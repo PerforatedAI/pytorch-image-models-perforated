@@ -20,6 +20,7 @@ import importlib
 import json
 import logging
 import os
+import sys
 import time
 from collections import OrderedDict
 from contextlib import suppress
@@ -64,6 +65,12 @@ except ImportError as e:
 
 has_compile = hasattr(torch, 'compile')
 
+try:
+    from perforatedai import globals_perforatedai as GPA
+    from perforatedai import utils_perforatedai as UPA
+    has_perforatedai = True
+except ImportError:
+    has_perforatedai = False
 
 _logger = logging.getLogger('train')
 
@@ -420,6 +427,19 @@ group.add_argument('--train-size-schedule-spread', type=float, default=0.65,
                    help='Progressive schedule spread in resolution-choice index units (default: 0.65)')
 group.add_argument('--train-size-random-mix', type=float, default=0.1,
                    help='Fraction of uniform random active choices mixed into a progressive schedule (default: 0.1)')
+
+# PerforatedAI parameters
+group = parser.add_argument_group('PerforatedAI parameters')
+group.add_argument('--perforate-model', action='store_true', default=False,
+                   help='Enable PerforatedAI dendrite training (requires perforatedai package)')
+group.add_argument('--perforate-model-parallel', action='store_true', default=False,
+                   help='Initialize PAI tracker settings for DDP (run once on single GPU before distributed run)')
+group.add_argument('--pai-load-folder', type=str, default=None,
+                   help='Folder to load PAI state from for DDP automatic resumption after restructure')
+group.add_argument('--pai-save-name', type=str, default='PAI',
+                   help='Save name/folder for PAI checkpoints (default: PAI)')
+
+group = parser.add_argument_group('Scheduled resolution loader parameters')
 group.add_argument('--train-batches-per-epoch', '--train-steps-per-epoch', type=int, default=None,
                    help='Fixed loader batches (before gradient accumulation) per epoch; inferred if unspecified')
 group.add_argument('--variable-batch-loss-scale', default='none', type=str, choices=('none', 'sqrt', 'linear'),
@@ -504,6 +524,9 @@ def main():
 
     args.prefetcher = not args.no_prefetcher
     args.grad_accum_steps = max(1, args.grad_accum_steps)
+    if has_perforatedai and args.perforate_model and args.grad_accum_steps > 1:
+        _logger.warning('PerforatedAI does not support gradient accumulation; overriding --grad-accum-steps to 1.')
+        args.grad_accum_steps = 1
     if args.naflex_loader and args.train_img_sizes is not None:
         parser.error('--naflex-loader and --train-img-sizes are alternative loader modes.')
     if args.naflex_loader and args.use_multi_epochs_loader:
@@ -538,6 +561,14 @@ def main():
         utils.set_jit_fuser(args.fuser)
     if args.fast_norm:
         set_fast_norm()
+
+    if has_perforatedai and args.perforate_model:
+        GPA.pc.set_testing_dendrite_capacity(False)
+        for i in range(4):
+            GPA.pc.append_module_ids_to_track([".layer" + str(i + 1)])
+        GPA.pc.append_module_ids_to_track([".conv1", ".bn1"])
+        GPA.pc.set_module_names_to_perforate(['Conv2d', 'Linear'])
+        GPA.pc.set_output_dimensions([-1, 0, -1, -1])
 
     in_chans = 3
     if args.in_chans is not None:
@@ -582,6 +613,23 @@ def main():
 
     if args.grad_checkpointing:
         model.set_grad_checkpointing(enable=True)
+
+    if has_perforatedai and args.perforate_model:
+        model = UPA.perforate_model(model, save_name=args.pai_save_name, maximizing_score=(args.eval_metric != 'loss'))
+        if args.pai_load_folder is not None:
+            import glob as _glob
+            _switch_files = _glob.glob(f'{args.pai_load_folder}/switch_*.pt')
+            if _switch_files:
+                _switch_nums = []
+                for _sf in _switch_files:
+                    try:
+                        _switch_nums.append(int(_sf.split('switch_')[1].split('.pt')[0]))
+                    except Exception:
+                        pass
+                if _switch_nums:
+                    _max_switch = max(_switch_nums)
+                    model = UPA.load_system(model, args.pai_load_folder, f'switch_{_max_switch}', True)
+                    _logger.info(f'Loaded PAI state from {args.pai_load_folder}/switch_{_max_switch}.pt')
 
     # Create training task (classification or distillation)
     task = None
@@ -1001,6 +1049,11 @@ def main():
             f'Created {type(optimizer).__name__} ({args.opt}) optimizer: {defaults}'
         )
 
+    if has_perforatedai and args.perforate_model and not args.distributed:
+        # Single-GPU: register type then instance; no initialize_tracker_settings() follows
+        GPA.pai_tracker.set_optimizer(type(optimizer))
+        GPA.pai_tracker.set_optimizer_instance(optimizer)
+
     # optionally resume from a checkpoint
     resume_epoch = None
     if args.resume:
@@ -1013,7 +1066,7 @@ def main():
         )
 
     # setup exponential moving average of model weights, SWA could be used here too
-    if args.model_ema:
+    if args.model_ema and not (has_perforatedai and args.perforate_model):
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before DDP wrapper
         task.setup_ema(
             decay=args.model_ema_decay,
@@ -1044,7 +1097,20 @@ def main():
     if args.distributed:
         if utils.is_primary(args):
             _logger.info("Preparing task for distributed training")
-        task.prepare_distributed(device_ids=[device], broadcast_buffers=not args.no_ddp_bb)
+        _ddp_kwargs = {'broadcast_buffers': not args.no_ddp_bb}
+        if has_perforatedai and args.perforate_model:
+            # Required for PAI: some parameters intentionally lack gradients during selective training
+            _ddp_kwargs['find_unused_parameters'] = True
+            # Disable per-forward buffer broadcast: it interleaves NCCL ops with gradient allreduce
+            # ops and causes a deadlock when ranks are out of sync during data loading.
+            # BN stats are synced explicitly via distribute_bn after each training epoch.
+            _ddp_kwargs['broadcast_buffers'] = False
+            # Skill Step 2.5: register optimizer type and instance BEFORE initialize_tracker_settings
+            GPA.pai_tracker.set_optimizer(type(optimizer))
+            GPA.pai_tracker.set_optimizer_instance(optimizer)
+            # Skill Step 3: initialize PAI tracker settings on the raw model BEFORE DDP wrapping
+            GPA.pai_tracker.initialize_tracker_settings()
+        task.prepare_distributed(device_ids=[device], **_ddp_kwargs)
         model = task.get_trainable_module()
 
     # setup checkpoint saver and eval metric tracking
@@ -1123,112 +1189,159 @@ def main():
             f'LR stepped per {"epoch" if lr_scheduler.t_in_epochs else "update"}.')
 
     results = []
-    try:
-        for epoch in range(start_epoch, num_epochs):
-            _set_loader_epoch(loader_train, epoch)
+    # Perforated models should only quit when training_complete is true.
+    # By just editing num_epochs here it wont mess with scheduluers that are epoch based
+    if has_perforatedai and args.perforate_model:
+        num_epochs = 10000000
+    for epoch in range(start_epoch, num_epochs):
+        if args.distributed:
+            torch.distributed.barrier()
+        _set_loader_epoch(loader_train, epoch)
 
-            train_metrics = train_one_epoch(
-                epoch,
-                model,
-                loader_train,
-                optimizer,
+        train_metrics = train_one_epoch(
+            epoch,
+            model,
+            loader_train,
+            optimizer,
+            args,
+            task=task,
+            device=device,
+            lr_scheduler=lr_scheduler,
+            saver=saver,
+            output_dir=output_dir,
+            amp_autocast=amp_autocast,
+            loss_scaler=loss_scaler,
+            model_dtype=model_dtype,
+            mixup_fn=mixup_fn,
+            num_updates_total=num_epochs * updates_per_epoch,
+            naflex_mode=naflex_mode,
+            scheduled_batch_mode=scheduled_batch_mode,
+            batch_size_reference=batch_size_reference,
+        )
+
+        if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+            if utils.is_primary(args):
+                _logger.info("Distributing BatchNorm running means and vars")
+            utils.distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
+
+        epoch_p_1 = epoch + 1
+        if epoch_p_1 % args.val_interval != 0 and epoch_p_1 != num_epochs:
+            if utils.is_primary(args):
+                _logger.info("Skipping eval and checkpointing ")
+            if lr_scheduler is not None:
+                # step LR for next epoch, take care when using metric dependent lr_scheduler
+                lr_scheduler.step(epoch_p_1, metric=None)
+            # Skip validation and metric logic
+            # FIXME we could make the logic below able to handle no eval metrics more gracefully,
+            #  but for simplicity opting to just skip for now.
+            continue
+
+        if loader_eval is not None:
+            eval_metrics = validate(
+                eval_model,
+                loader_eval,
+                validate_loss_fn,
                 args,
-                task=task,
                 device=device,
-                lr_scheduler=lr_scheduler,
-                saver=saver,
-                output_dir=output_dir,
                 amp_autocast=amp_autocast,
-                loss_scaler=loss_scaler,
                 model_dtype=model_dtype,
-                mixup_fn=mixup_fn,
-                num_updates_total=num_epochs * updates_per_epoch,
-                naflex_mode=naflex_mode,
-                scheduled_batch_mode=scheduled_batch_mode,
-                batch_size_reference=batch_size_reference,
             )
 
-            if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                if utils.is_primary(args):
-                    _logger.info("Distributing BatchNorm running means and vars")
-                utils.distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
+            ema_model = task.get_trainable_module(ema=True)
+            if ema_model is not None and not args.model_ema_force_cpu:
+                if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+                    utils.distribute_bn(ema_model, args.world_size, args.dist_bn == 'reduce')
 
-            epoch_p_1 = epoch + 1
-            if epoch_p_1 % args.val_interval != 0 and epoch_p_1 != num_epochs:
-                if utils.is_primary(args):
-                    _logger.info("Skipping eval and checkpointing ")
-                if lr_scheduler is not None:
-                    # step LR for next epoch, take care when using metric dependent lr_scheduler
-                    lr_scheduler.step(epoch_p_1, metric=None)
-                # Skip validation and metric logic
-                # FIXME we could make the logic below able to handle no eval metrics more gracefully,
-                #  but for simplicity opting to just skip for now.
-                continue
-
-            if loader_eval is not None:
-                eval_metrics = validate(
-                    eval_model,
+                ema_eval_metrics = validate(
+                    task.get_eval_model(ema=True),
                     loader_eval,
                     validate_loss_fn,
                     args,
                     device=device,
                     amp_autocast=amp_autocast,
-                    model_dtype=model_dtype,
+                    log_suffix=' (EMA)',
                 )
+                eval_metrics = ema_eval_metrics
+        else:
+            eval_metrics = None
 
-                ema_model = task.get_trainable_module(ema=True)
-                if ema_model is not None and not args.model_ema_force_cpu:
-                    if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                        utils.distribute_bn(ema_model, args.world_size, args.dist_bn == 'reduce')
+        if output_dir is not None:
+            lrs = [param_group['lr'] for param_group in optimizer.param_groups]
+            utils.update_summary(
+                epoch,
+                train_metrics,
+                eval_metrics,
+                filename=os.path.join(output_dir, 'summary.csv'),
+                lr=sum(lrs) / len(lrs),
+                write_header=best_metric is None,
+                log_wandb=args.log_wandb and has_wandb,
+            )
 
-                    ema_eval_metrics = validate(
-                        task.get_eval_model(ema=True),
-                        loader_eval,
-                        validate_loss_fn,
-                        args,
-                        device=device,
-                        amp_autocast=amp_autocast,
-                        log_suffix=' (EMA)',
+        if eval_metrics is not None:
+            latest_metric = eval_metrics[eval_metric]
+        else:
+            latest_metric = train_metrics[eval_metric]
+
+        if has_perforatedai and args.perforate_model:
+            _pai_model = task.get_trainable_module()
+            if args.distributed:
+                if utils.is_primary(args):
+                    _pai_inner = _pai_model.module
+                    _pai_inner, _pai_restructured, _pai_complete = GPA.pai_tracker.add_validation_score(
+                        latest_metric, _pai_inner
                     )
-                    eval_metrics = ema_eval_metrics
+                    _pai_inner = _pai_inner.to(device)
+                    _pai_model.module = _pai_inner
+                else:
+                    _pai_restructured = False
+                    _pai_complete = False
+                _r_t = torch.tensor([1 if _pai_restructured else 0], dtype=torch.int, device=device)
+                _c_t = torch.tensor([1 if _pai_complete else 0], dtype=torch.int, device=device)
+                torch.distributed.broadcast(_r_t, src=0)
+                torch.distributed.broadcast(_c_t, src=0)
+                _pai_restructured = bool(_r_t.item())
+                _pai_complete = bool(_c_t.item())
             else:
-                eval_metrics = None
-
-            if output_dir is not None:
-                lrs = [param_group['lr'] for param_group in optimizer.param_groups]
-                utils.update_summary(
-                    epoch,
-                    train_metrics,
-                    eval_metrics,
-                    filename=os.path.join(output_dir, 'summary.csv'),
-                    lr=sum(lrs) / len(lrs),
-                    write_header=best_metric is None,
-                    log_wandb=args.log_wandb and has_wandb,
+                _pai_model, _pai_restructured, _pai_complete = GPA.pai_tracker.add_validation_score(
+                    latest_metric, _pai_model
                 )
+                _pai_model = _pai_model.to(device)
 
-            if eval_metrics is not None:
-                latest_metric = eval_metrics[eval_metric]
-            else:
-                latest_metric = train_metrics[eval_metric]
+            if _pai_complete:
+                if utils.is_primary(args):
+                    _logger.info('PAI training complete!')
+                    os.makedirs(args.pai_save_name, exist_ok=True)
+                    with open(os.path.join(args.pai_save_name, '.training_complete'), 'w') as _f:
+                        _f.write('complete')
+                if args.distributed:
+                    torch.distributed.barrier()
+                    torch.distributed.destroy_process_group()
+                raise SystemExit(0)
 
-            if saver is not None:
-                # save proper checkpoint with eval metric
-                best_metric, best_epoch = saver.save_checkpoint(epoch, metric=latest_metric)
+            if _pai_restructured:
+                if utils.is_primary(args):
+                    _logger.info('PAI model restructured, exiting for shell script restart...')
+                if args.distributed:
+                    torch.distributed.barrier()
+                    torch.distributed.destroy_process_group()
+                raise SystemExit(0)
 
-            if lr_scheduler is not None:
-                # step LR for next epoch
-                lr_scheduler.step(epoch_p_1, latest_metric)
+        if saver is not None:
+            # save proper checkpoint with eval metric
+            best_metric, best_epoch = saver.save_checkpoint(epoch, metric=latest_metric)
 
-            latest_results = {
-                'epoch': epoch,
-                'train': train_metrics,
-            }
-            if eval_metrics is not None:
-                latest_results['validation'] = eval_metrics
-            results.append(latest_results)
+        if lr_scheduler is not None:
+            # step LR for next epoch
+            lr_scheduler.step(epoch_p_1, latest_metric)
 
-    except KeyboardInterrupt:
-        pass
+        latest_results = {
+            'epoch': epoch,
+            'train': train_metrics,
+        }
+        if eval_metrics is not None:
+            latest_results['validation'] = eval_metrics
+        results.append(latest_results)
+
 
     if args.distributed:
         torch.distributed.destroy_process_group()
@@ -1320,6 +1433,12 @@ def train_one_epoch(
             return _loss, result
 
         def _backward(_loss):
+            if has_perforatedai and args.perforate_model and args.distributed:
+                # PAI selective training means some params won't receive gradients; pre-init prevents
+                # DDP allreduce crash: "Encountered gradient which is undefined"
+                for _p in model.parameters():
+                    if _p.requires_grad and _p.grad is None:
+                        _p.grad = torch.zeros_like(_p)
             clip_parameters = None
             if args.clip_grad is not None:
                 clip_parameters = task.get_clip_parameters(exclude_head='agc' in args.clip_mode)
@@ -1406,6 +1525,14 @@ def train_one_epoch(
         if not need_update:
             data_start_time = time.time()
             continue
+
+        if has_perforatedai and args.perforate_model and args.perforate_model_parallel:
+            if utils.is_primary(args):
+                GPA.pai_tracker.save_tracker_settings()
+                _logger.info('PAI DDP settings saved. Run without --perforate-model-parallel for training.')
+            if args.distributed:
+                torch.distributed.barrier()
+            raise SystemExit(0)
 
         num_updates += 1
         optimizer.zero_grad()
