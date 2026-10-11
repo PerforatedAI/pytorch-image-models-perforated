@@ -659,6 +659,24 @@ def _set_loader_epoch(loader, epoch: int) -> None:
         loader.sampler.set_epoch(epoch)
 
 
+class _PAIRestartScheduler:
+    """Runs a timm scheduler as if training restarted at `start_epoch`, like a DDP restart after a PAI restructure."""
+
+    def __init__(self, scheduler, start_epoch: int, updates_per_epoch: int):
+        self.scheduler = scheduler
+        self.start_epoch = start_epoch
+        self.start_update = start_epoch * updates_per_epoch
+
+    def step(self, epoch: int, metric=None) -> None:
+        self.scheduler.step(epoch - self.start_epoch, metric)
+
+    def step_update(self, num_updates: int, metric=None) -> None:
+        self.scheduler.step_update(num_updates - self.start_update, metric)
+
+    def __getattr__(self, name):
+        return getattr(self.scheduler, name)
+
+
 def main():
     utils.setup_default_logging()
     args, args_text = _parse_args()
@@ -1473,7 +1491,12 @@ def main():
                 _pai_model, _pai_restructured, _pai_complete = GPA.pai_tracker.add_validation_score(
                     latest_metric, _pai_model
                 )
-                _pai_model = _pai_model.to(device)
+                _pai_model.to(device=device, dtype=model_dtype)
+                if args.channels_last:
+                    _pai_model.to(memory_format=torch.channels_last)
+                task.trainable_module = _pai_model
+                model = task.get_trainable_module()
+                eval_model = task.get_eval_model()
 
             if _pai_complete:
                 if utils.is_primary(args):
@@ -1484,15 +1507,35 @@ def main():
                 if args.distributed:
                     torch.distributed.barrier()
                     torch.distributed.destroy_process_group()
-                raise SystemExit(0)
+                    raise SystemExit(0)
+                break
 
             if _pai_restructured:
-                if utils.is_primary(args):
-                    _logger.info('PAI model restructured, exiting for shell script restart...')
                 if args.distributed:
+                    if utils.is_primary(args):
+                        _logger.info('PAI model restructured, exiting for shell script restart...')
                     torch.distributed.barrier()
                     torch.distributed.destroy_process_group()
-                raise SystemExit(0)
+                    raise SystemExit(0)
+                # Single GPU continues in-process; these must match the optimizer and scheduler created above
+                _logger.info('PAI model restructured, continuing with a new optimizer and restarted LR schedule')
+                optimizer = create_optimizer_v2(
+                    model,
+                    **optimizer_kwargs(cfg=args),
+                    **args.opt_kwargs,
+                )
+                GPA.pai_tracker.set_optimizer_instance(optimizer)
+                _pai_scheduler, _ = create_scheduler_v2(
+                    optimizer,
+                    **scheduler_kwargs(args, decreasing_metric=decreasing_metric),
+                    updates_per_epoch=updates_per_epoch,
+                )
+                lr_scheduler = None
+                if _pai_scheduler is not None:
+                    lr_scheduler = _PAIRestartScheduler(_pai_scheduler, epoch_p_1, updates_per_epoch)
+                if saver is not None:
+                    saver.model = model
+                    saver.optimizer = optimizer
 
         if saver is not None:
             # save proper checkpoint with eval metric
