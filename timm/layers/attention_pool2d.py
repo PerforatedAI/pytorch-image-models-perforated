@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from .config import use_fused_attn
-from .helpers import to_2tuple
+from .helpers import get_device_dtype, to_2tuple
 from .pos_embed import resample_abs_pos_embed
 from .pos_embed_sincos import apply_rot_embed_cat, create_rope_embed
 from .weight_init import trunc_normal_
@@ -90,13 +90,14 @@ class RotAttentionPool2d(nn.Module):
         self.drop = nn.Dropout(drop_rate)
         self.proj = nn.Linear(embed_dim, self.out_features, **dd) if out_features != 0 else nn.Identity()
 
+        self.rotate_half = rope_type == 'mrope'
         self.pos_embed = create_rope_embed(
             rope_type=rope_type,
             dim=embed_dim,
             num_heads=num_heads,
             in_pixels=False,
             ref_feat_shape=ref_feat_size,
-            rotate_half=False,
+            rotate_half=self.rotate_half,
             **dd,
         )
 
@@ -114,13 +115,21 @@ class RotAttentionPool2d(nn.Module):
             trunc_normal_(self.qkv.weight, std=in_features ** -0.5)
             nn.init.zeros_(self.qkv.bias)
 
-    def reset(self, num_classes: Optional[int] = None, pool_type: Optional[str] = None):
+    def reset(
+            self,
+            num_classes: Optional[int] = None,
+            pool_type: Optional[str] = None,
+            device=None,
+            dtype=None,
+    ):
         # NOTE: this module is being used as a head, so need compatible reset()
+        dd = get_device_dtype(self, device=device, dtype=dtype)
         if pool_type is not None:
             assert pool_type in ('', 'token')
             self.pool_type = pool_type
         if num_classes is not None:
-            self.proj = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+            self.proj = nn.Linear(self.embed_dim, num_classes, **dd) if num_classes > 0 else nn.Identity()
+            self.proj.train(self.training)
             self.out_features = num_classes if num_classes > 0 else self.embed_dim
 
     def _pool(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
@@ -151,8 +160,12 @@ class RotAttentionPool2d(nn.Module):
         if isinstance(rope, tuple):
             # RotaryEmbedding returns (sin, cos) tuple - concatenate for apply_rot_embed_cat
             rope = torch.cat(rope, dim=-1)
-        q = torch.cat([q[:, :, :1, :], apply_rot_embed_cat(q[:, :, 1:, :], rope)], dim=2).type_as(v)
-        k = torch.cat([k[:, :, :1, :], apply_rot_embed_cat(k[:, :, 1:, :], rope)], dim=2).type_as(v)
+        q = torch.cat([
+            q[:, :, :1, :], apply_rot_embed_cat(q[:, :, 1:, :], rope, half=self.rotate_half),
+        ], dim=2).type_as(v)
+        k = torch.cat([
+            k[:, :, :1, :], apply_rot_embed_cat(k[:, :, 1:, :], rope, half=self.rotate_half),
+        ], dim=2).type_as(v)
 
         if self.fused_attn:
             x = nn.functional.scaled_dot_product_attention(q, k, v)
@@ -259,13 +272,21 @@ class AttentionPool2d(nn.Module):
             nn.init.zeros_(self.qkv.bias)
         trunc_normal_(self.pos_embed, std=in_features ** -0.5)
 
-    def reset(self, num_classes: Optional[int] = None, pool_type: Optional[str] = None):
+    def reset(
+            self,
+            num_classes: Optional[int] = None,
+            pool_type: Optional[str] = None,
+            device=None,
+            dtype=None,
+    ):
         # NOTE: this module is being used as a head, so need compatible reset()
+        dd = get_device_dtype(self, device=device, dtype=dtype)
         if pool_type is not None:
             assert pool_type in ('', 'token')
             self.pool_type = pool_type
         if num_classes is not None:
-            self.proj = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+            self.proj = nn.Linear(self.embed_dim, num_classes, **dd) if num_classes > 0 else nn.Identity()
+            self.proj.train(self.training)
             self.out_features = num_classes if num_classes > 0 else self.embed_dim
 
     def _pool(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:

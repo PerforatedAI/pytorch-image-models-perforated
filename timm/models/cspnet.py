@@ -6,7 +6,9 @@ A PyTorch implementation of Cross Stage Partial Networks including:
 * CSPDarkNet53
 * and DarkNet53 for good measure
 
-Based on paper `CSPNet: A New Backbone that can Enhance Learning Capability of CNN` - https://arxiv.org/abs/1911.11929
+Papers:
+* `CSPNet: A New Backbone that can Enhance Learning Capability of CNN` - https://arxiv.org/abs/1911.11929
+* `YOLOv3: An Incremental Improvement` - https://arxiv.org/abs/1804.02767 (DarkNet53)
 
 Reference impl via darknet cfg files at https://github.com/WongKinYiu/CrossStagePartialNetworks
 
@@ -20,7 +22,7 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import ClassifierHead, ConvNormAct, DropPath, calculate_drop_path_rates, get_attn, create_act_layer, make_divisible
+from timm.layers import ClassifierHead, ConvNormAct, DropPath, calculate_drop_path_rates, get_attn, create_act_layer, make_divisible, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._manipulate import named_apply, MATCH_PREV_GROUP
 from ._registry import register_model, generate_default_cfgs
@@ -800,8 +802,9 @@ class CspNet(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_features(self, x):
         x = self.stem(x)

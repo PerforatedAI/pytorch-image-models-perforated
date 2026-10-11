@@ -2,9 +2,9 @@
 
 DeiT model defs and weights from https://github.com/facebookresearch/deit, original copyright below
 
-paper: `DeiT: Data-efficient Image Transformers` - https://arxiv.org/abs/2012.12877
-
-paper: `DeiT III: Revenge of the ViT` - https://arxiv.org/abs/2204.07118
+Papers:
+* `Training data-efficient image transformers & distillation through attention` - https://arxiv.org/abs/2012.12877
+* `DeiT III: Revenge of the ViT` - https://arxiv.org/abs/2204.07118
 
 Modifications copyright 2021, Ross Wightman
 """
@@ -17,7 +17,7 @@ import torch
 from torch import nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import resample_abs_pos_embed
+from timm.layers import resample_abs_pos_embed, get_device_dtype
 from timm.models.vision_transformer import VisionTransformer, trunc_normal_, checkpoint_filter_fn
 from ._builder import build_model_with_cfg
 from ._registry import generate_default_cfgs, register_model, register_model_deprecations
@@ -69,9 +69,12 @@ class VisionTransformerDistilled(VisionTransformer):
         return self.head, self.head_dist
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(self.embed_dim, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head.train(self.training)
+        self.head_dist = nn.Linear(self.embed_dim, self.num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head_dist.train(self.training)
 
     @torch.jit.ignore
     def set_distilled_training(self, enable=True):
@@ -112,6 +115,8 @@ class VisionTransformerDistilled(VisionTransformer):
 
     def forward_head(self, x, pre_logits: bool = False) -> torch.Tensor:
         x, x_dist = x[:, 0], x[:, 1]
+        x = self.head_drop(x)
+        x_dist = self.head_drop(x_dist)
         if pre_logits:
             return (x + x_dist) / 2
         x = self.head(x)
@@ -353,7 +358,7 @@ def deit3_small_patch16_384(pretrained=False, **kwargs) -> VisionTransformer:
 
 @register_model
 def deit3_medium_patch16_224(pretrained=False, **kwargs) -> VisionTransformer:
-    """ DeiT-3 medium model @ 224x224 (https://arxiv.org/abs/2012.12877).
+    """ DeiT-3 medium model @ 224x224 (https://arxiv.org/abs/2204.07118).
     ImageNet-1k weights from https://github.com/facebookresearch/deit.
     """
     model_args = dict(patch_size=16, embed_dim=512, depth=12, num_heads=8, no_embed_class=True, init_values=1e-6)
@@ -403,7 +408,7 @@ def deit3_large_patch16_384(pretrained=False, **kwargs) -> VisionTransformer:
 
 @register_model
 def deit3_huge_patch14_224(pretrained=False, **kwargs) -> VisionTransformer:
-    """ DeiT-3 base model @ 384x384 from paper (https://arxiv.org/abs/2204.07118).
+    """ DeiT-3 huge model @ 224x224 from paper (https://arxiv.org/abs/2204.07118).
     ImageNet-1k weights from https://github.com/facebookresearch/deit.
     """
     model_args = dict(patch_size=14, embed_dim=1280, depth=32, num_heads=16, no_embed_class=True, init_values=1e-6)

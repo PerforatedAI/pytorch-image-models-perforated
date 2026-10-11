@@ -1,10 +1,8 @@
 """ Normalization Free Nets. NFNet, NF-RegNet, NF-ResNet (pre-activation) Models
 
-Paper: `Characterizing signal propagation to close the performance gap in unnormalized ResNets`
-    - https://arxiv.org/abs/2101.08692
-
-Paper: `High-Performance Large-Scale Image Recognition Without Normalization`
-    - https://arxiv.org/abs/2102.06171
+Papers:
+* `Characterizing signal propagation to close the performance gap in unnormalized ResNets` - https://arxiv.org/abs/2101.08692
+* `High-Performance Large-Scale Image Recognition Without Normalization` - https://arxiv.org/abs/2102.06171
 
 Official Deepmind JAX code: https://github.com/deepmind/deepmind-research/tree/master/nfnets
 
@@ -26,7 +24,7 @@ import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import ClassifierHead, DropPath, calculate_drop_path_rates, AvgPool2dSame, ScaledStdConv2d, ScaledStdConv2dSame, \
-    get_act_layer, get_act_fn, get_attn, make_divisible
+    get_act_layer, get_act_fn, get_attn, make_divisible, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features_fx import register_notrace_module
 from ._manipulate import checkpoint_seq
@@ -548,8 +546,9 @@ class NormFreeNet(nn.Module):
             num_classes: Number of classes for new classifier.
             global_pool: Global pooling type.
         """
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through feature extraction layers.

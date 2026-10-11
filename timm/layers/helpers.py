@@ -5,6 +5,10 @@ Hacked together by / Copyright 2020 Ross Wightman
 from itertools import repeat
 import collections.abc
 
+import torch
+
+_HAS_COMPILER_IS_EXPORTING = hasattr(torch, 'compiler') and hasattr(torch.compiler, 'is_exporting')  # PyTorch >= 2.7
+
 
 # From PyTorch internals
 def _ntuple(n):
@@ -31,6 +35,21 @@ to_2tuple = _ntuple(2)
 to_3tuple = _ntuple(3)
 to_4tuple = _ntuple(4)
 to_ntuple = _ntuple
+
+
+def get_device_dtype(module, device=None, dtype=None):
+    """Resolve factory device and dtype kwargs from a parent module.
+
+    Explicit values take precedence. Missing values are inferred from the
+    module's first parameter, if it has one.
+    """
+    parameter = next(module.parameters(), None)
+    if parameter is not None:
+        if device is None:
+            device = parameter.device
+        if dtype is None:
+            dtype = parameter.dtype
+    return {'device': device, 'dtype': dtype}
 
 
 def make_divisible(v, divisor=8, min_value=None, round_limit=.9):
@@ -77,3 +96,22 @@ def extend_tuple(x, n):
     if pad_n <= 0:
         return x[:n]
     return x + (x[-1],) * pad_n
+
+
+@torch.jit.unused
+def _compiler_is_exporting() -> bool:
+    return _HAS_COMPILER_IS_EXPORTING and torch.compiler.is_exporting()
+
+
+def is_exporting() -> bool:
+    """Return True while the model is being exported with torch.export (incl. the dynamo ONNX exporter).
+
+    Use to avoid Python branches on input shape or data that would specialize the exported graph to the
+    example input. Always False when scripting or tracing, and with PyTorch < 2.7 (no is_exporting()).
+
+    NOTE: also True within torch.compile for PyTorch 2.7 - 2.11, so code paths
+    selected by this must produce the same result as the non-export path.
+    """
+    if torch.jit.is_scripting():
+        return False
+    return _compiler_is_exporting()

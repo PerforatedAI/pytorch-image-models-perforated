@@ -1,12 +1,12 @@
 """ LeViT
 
-Paper: `LeViT: a Vision Transformer in ConvNet's Clothing for Faster Inference`
-    - https://arxiv.org/abs/2104.01136
+Papers:
+    * `LeViT: a Vision Transformer in ConvNet's Clothing for Faster Inference` - https://arxiv.org/abs/2104.01136
 
 @article{graham2021levit,
   title={LeViT: a Vision Transformer in ConvNet's Clothing for Faster Inference},
   author={Benjamin Graham and Alaaeldin El-Nouby and Hugo Touvron and Pierre Stock and Armand Joulin and Herv\'e J\'egou and Matthijs Douze},
-  journal={arXiv preprint arXiv:22104.01136},
+  journal={arXiv preprint arXiv:2104.01136},
   year={2021}
 }
 
@@ -31,7 +31,7 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_STD, IMAGENET_DEFAULT_MEAN
-from timm.layers import to_ntuple, to_2tuple, get_act_layer, DropPath, trunc_normal_, ndgrid
+from timm.layers import to_ntuple, to_2tuple, get_act_layer, DropPath, trunc_normal_, ndgrid, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._manipulate import checkpoint, checkpoint_seq
@@ -263,8 +263,12 @@ class Attention(nn.Module):
     @torch.no_grad()
     def train(self, mode=True):
         super().train(mode)
-        if mode and self.attention_bias_cache:
+        if self.attention_bias_cache:
             self.attention_bias_cache = {}  # clear ab cache
+
+    def _apply(self, fn, *args, **kwargs):
+        self.attention_bias_cache = {}
+        return super()._apply(fn, *args, **kwargs)
 
     def reset_parameters(self) -> None:
         """Initialize parameters and buffers."""
@@ -390,8 +394,12 @@ class AttentionDownsample(nn.Module):
     @torch.no_grad()
     def train(self, mode=True):
         super().train(mode)
-        if mode and self.attention_bias_cache:
+        if self.attention_bias_cache:
             self.attention_bias_cache = {}  # clear ab cache
+
+    def _apply(self, fn, *args, **kwargs):
+        self.attention_bias_cache = {}
+        return super()._apply(fn, *args, **kwargs)
 
     def reset_parameters(self) -> None:
         """Initialize parameters and buffers."""
@@ -764,8 +772,11 @@ class Levit(nn.Module):
     @torch.jit.ignore
     def group_matcher(self, coarse=False):
         matcher = dict(
-            stem=r'^cls_token|pos_embed|patch_embed',  # stem and embed
-            blocks=[(r'^blocks\.(\d+)', None), (r'^norm', (99999,))]
+            stem=r'^stem',  # stem and embed
+            blocks=r'^stages\.(\d+)' if coarse else [
+                (r'^stages\.(\d+)\.downsample', (0,)),
+                (r'^stages\.(\d+)\.blocks\.(\d+)', None),
+            ]
         )
         return matcher
 
@@ -778,11 +789,13 @@ class Levit(nn.Module):
         return self.head
 
     def reset_classifier(self, num_classes: int , global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
         if global_pool is not None:
             self.global_pool = global_pool
         self.head = NormLinear(
-            self.num_features, num_classes, drop=self.drop_rate) if num_classes > 0 else nn.Identity()
+            self.num_features, num_classes, drop=self.drop_rate, **dd) if num_classes > 0 else nn.Identity()
+        self.head.train(self.training)
 
     def forward_intermediates(
             self,
@@ -876,7 +889,8 @@ class LevitDistilled(Levit):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         dd = {'device': kwargs.get('device', None), 'dtype': kwargs.get('dtype', None)}
-        self.head_dist = NormLinear(self.num_features, self.num_classes, **dd) if self.num_classes > 0 else nn.Identity()
+        self.head_dist = NormLinear(
+            self.num_features, self.num_classes, drop=self.drop_rate, **dd) if self.num_classes > 0 else nn.Identity()
         self.distilled_training = False  # must set this True to train w/ distillation token
 
     @torch.jit.ignore
@@ -884,12 +898,16 @@ class LevitDistilled(Levit):
         return self.head, self.head_dist
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
         if global_pool is not None:
             self.global_pool = global_pool
         self.head = NormLinear(
-            self.num_features, num_classes, drop=self.drop_rate) if num_classes > 0 else nn.Identity()
-        self.head_dist = NormLinear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+            self.num_features, num_classes, drop=self.drop_rate, **dd) if num_classes > 0 else nn.Identity()
+        self.head.train(self.training)
+        self.head_dist = NormLinear(
+            self.num_features, num_classes, drop=self.drop_rate, **dd) if num_classes > 0 else nn.Identity()
+        self.head_dist.train(self.training)
 
     @torch.jit.ignore
     def set_distilled_training(self, enable=True):

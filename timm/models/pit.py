@@ -1,7 +1,7 @@
 """ Pooling-based Vision Transformer (PiT) in PyTorch
 
-A PyTorch implement of Pooling-based Vision Transformers as described in
-'Rethinking Spatial Dimensions of Vision Transformers' - https://arxiv.org/abs/2103.16302
+A PyTorch implement of Pooling-based Vision Transformers as described in:
+* `Rethinking Spatial Dimensions of Vision Transformers` - https://arxiv.org/abs/2103.16302
 
 This code was adapted from the original version at https://github.com/naver-ai/pit, original copyright below.
 
@@ -20,7 +20,7 @@ import torch
 from torch import nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import trunc_normal_, to_2tuple, calculate_drop_path_rates
+from timm.layers import trunc_normal_, to_2tuple, calculate_drop_path_rates, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._registry import register_model, generate_default_cfgs
@@ -181,7 +181,7 @@ class PoolingVisionTransformer(nn.Module):
             global_pool: str = 'token',
             distilled: bool = False,
             drop_rate: float = 0.,
-            pos_drop_drate: float = 0.,
+            pos_drop_rate: float = 0.,
             proj_drop_rate: float = 0.,
             attn_drop_rate: float = 0.,
             drop_path_rate: float = 0.,
@@ -204,7 +204,7 @@ class PoolingVisionTransformer(nn.Module):
         self.patch_embed = ConvEmbedding(in_chans, embed_dim, img_size, patch_size, stride, **dd)
         self.pos_embed = nn.Parameter(torch.randn(1, embed_dim, self.patch_embed.height, self.patch_embed.width, **dd))
         self.cls_token = nn.Parameter(torch.randn(1, self.num_tokens, embed_dim, **dd))
-        self.pos_drop = nn.Dropout(p=pos_drop_drate)
+        self.pos_drop = nn.Dropout(p=pos_drop_rate)
 
         transformers = []
         # stochastic depth decay rule
@@ -274,14 +274,15 @@ class PoolingVisionTransformer(nn.Module):
             return self.head
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
         if global_pool is not None:
             self.global_pool = global_pool
-        device = self.head.weight.device if hasattr(self.head, 'weight') else None
-        dtype = self.head.weight.dtype if hasattr(self.head, 'weight') else None
-        self.head = nn.Linear(self.embed_dim, num_classes, device=device, dtype=dtype) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(self.embed_dim, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head.train(self.training)
         if self.head_dist is not None:
-            self.head_dist = nn.Linear(self.embed_dim, self.num_classes, device=device, dtype=dtype) if num_classes > 0 else nn.Identity()
+            self.head_dist = nn.Linear(self.embed_dim, self.num_classes, **dd) if num_classes > 0 else nn.Identity()
+            self.head_dist.train(self.training)
 
     def forward_intermediates(
             self,

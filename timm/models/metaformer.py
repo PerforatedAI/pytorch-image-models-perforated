@@ -4,6 +4,10 @@ Poolformer from MetaFormer is Actually What You Need for Vision https://arxiv.or
 IdentityFormer, RandFormer, PoolFormerV2, ConvFormer, and CAFormer
 from MetaFormer Baselines for Vision https://arxiv.org/abs/2210.13452
 
+Papers:
+    * `MetaFormer Is Actually What You Need for Vision` - https://arxiv.org/abs/2111.11418
+    * `MetaFormer Baselines for Vision` - https://arxiv.org/abs/2210.13452
+
 All implemented models support feature extraction and variable input resolution.
 
 Original implementation by Weihao Yu et al.,
@@ -26,6 +30,7 @@ Adapted from https://github.com/sail-sg/metaformer, original copyright below
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from collections import OrderedDict
 from functools import partial
 from typing import List, Optional, Tuple, Union, Type
@@ -38,6 +43,7 @@ from torch.jit import Final
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import (
+    get_device_dtype,
     trunc_normal_,
     DropPath,
     calculate_drop_path_rates,
@@ -572,6 +578,19 @@ class MetaFormer(nn.Module):
         if not isinstance(res_scale_init_values, (list, tuple)):
             res_scale_init_values = [res_scale_init_values] * self.num_stages
 
+        # remaining kwargs are passed through to every token mixer, each must be an arg of at least one of them
+        if kwargs:
+            mixer_args = set()
+            for tm in token_mixers:
+                mixer_args.update(
+                    n for n, p in inspect.signature(tm).parameters.items()
+                    if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+                )
+            unknown_kwargs = set(kwargs) - mixer_args
+            if unknown_kwargs:
+                raise TypeError(
+                    f'{type(self).__name__}.__init__() got unexpected keyword argument(s): {sorted(unknown_kwargs)}')
+
         self.grad_checkpointing = False
         self.feature_info = []
 
@@ -607,11 +626,10 @@ class MetaFormer(nn.Module):
 
         self.stages = nn.Sequential(*stages)
 
-        # if using MlpHead, dropout is handled by MlpHead
         if num_classes > 0:
             if self.use_mlp_head:
                 # FIXME not actually returning mlp hidden state right now as pre-logits.
-                final = MlpHead(self.num_features, num_classes, drop_rate=self.drop_rate, **dd)
+                final = MlpHead(self.num_features, num_classes, **dd)
                 self.head_hidden_size = self.num_features
             else:
                 final = nn.Linear(self.num_features, num_classes, **dd)
@@ -623,7 +641,7 @@ class MetaFormer(nn.Module):
             ('global_pool', SelectAdaptivePool2d(pool_type=global_pool)),
             ('norm', output_norm(self.num_features, **dd)),
             ('flatten', nn.Flatten(1) if global_pool else nn.Identity()),
-            ('drop', nn.Dropout(drop_rate) if self.use_mlp_head else nn.Identity()),
+            ('drop', nn.Dropout(drop_rate)),
             ('fc', final)
         ]))
 
@@ -646,19 +664,22 @@ class MetaFormer(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None, device=None, dtype=None):
-        dd = {'device': device, 'dtype': dtype}
+        dd = get_device_dtype(self, device=device, dtype=dtype)
         self.num_classes = num_classes
         if global_pool is not None:
             self.head.global_pool = SelectAdaptivePool2d(pool_type=global_pool)
+            self.head.global_pool.train(self.head.training)
             self.head.flatten = nn.Flatten(1) if global_pool else nn.Identity()
+            self.head.flatten.train(self.head.training)
         if num_classes > 0:
             if self.use_mlp_head:
-                final = MlpHead(self.num_features, num_classes, drop_rate=self.drop_rate, **dd)
+                final = MlpHead(self.num_features, num_classes, **dd)
             else:
                 final = nn.Linear(self.num_features, num_classes, **dd)
         else:
             final = nn.Identity()
         self.head.fc = final
+        self.head.fc.train(self.head.training)
 
     def forward_intermediates(
             self,

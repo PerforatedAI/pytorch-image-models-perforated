@@ -5,6 +5,9 @@ Additional credit to https://github.com/creafz
 
 Original model: https://github.com/hujie-frank/SENet
 
+Papers:
+* `Squeeze-and-Excitation Networks` - https://arxiv.org/abs/1709.01507
+
 ResNet code gently borrowed from
 https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py
 
@@ -20,7 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import create_classifier
+from timm.layers import create_classifier, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._registry import register_model, generate_default_cfgs
 
@@ -414,10 +417,15 @@ class SENet(nn.Module):
     def get_classifier(self) -> nn.Module:
         return self.last_linear
 
-    def reset_classifier(self, num_classes: int, global_pool: str = 'avg'):
+    def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
+        if global_pool is None:
+            global_pool = self.global_pool.pool_type
         self.global_pool, self.last_linear = create_classifier(
-            self.num_features, self.num_classes, pool_type=global_pool)
+            self.num_features, self.num_classes, pool_type=global_pool, **dd)
+        self.global_pool.train(self.training)
+        self.last_linear.train(self.training)
 
     def forward_features(self, x):
         x = self.layer0(x)

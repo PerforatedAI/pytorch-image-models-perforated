@@ -1,7 +1,7 @@
 """ VoVNet (V1 & V2)
 
 Papers:
-* `An Energy and GPU-Computation Efficient Backbone Network` - https://arxiv.org/abs/1904.09730
+* `An Energy and GPU-Computation Efficient Backbone Network for Real-Time Object Detection` - https://arxiv.org/abs/1904.09730
 * `CenterMask : Real-Time Anchor-Free Instance Segmentation` - https://arxiv.org/abs/1911.06667
 
 Looked at  https://github.com/youngwanLEE/vovnet-detectron2 &
@@ -18,7 +18,7 @@ import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import ConvNormAct, SeparableConvNormAct, BatchNormAct2d, ClassifierHead, DropPath, \
-    create_attn, create_norm_act_layer, calculate_drop_path_rates
+    create_attn, create_norm_act_layer, calculate_drop_path_rates, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._manipulate import checkpoint_seq
@@ -203,6 +203,10 @@ class VovNet(nn.Module):
         self.drop_rate = drop_rate
         assert output_stride == 32  # FIXME support dilation
 
+        unknown_kwargs = set(kwargs) - set(cfg) - {'stem_stride'}
+        if unknown_kwargs:
+            raise TypeError(
+                f'{type(self).__name__}.__init__() got unexpected keyword argument(s): {sorted(unknown_kwargs)}')
         cfg = dict(cfg, **kwargs)
         stem_stride = cfg.get("stem_stride", 4)
         stem_chs = cfg["stem_chs"]
@@ -273,8 +277,9 @@ class VovNet(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_intermediates(
             self,

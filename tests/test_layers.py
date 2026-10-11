@@ -2,13 +2,22 @@ import pytest
 import torch
 import torch.nn as nn
 
+import timm.layers.fast_norm as fast_norm
 from timm.layers import (
     Attention2d,
+    AttentionPool2d,
+    ClassifierHead,
+    ClNormMlpClassifierHead,
+    HybridEmbed,
     MultiQueryAttentionV2,
+    NormMlpClassifierHead,
+    PatchEmbed,
     PatchEmbedInterpolator,
+    RotAttentionPool2d,
     create_act_layer,
     get_act_fn,
     get_act_layer,
+    get_device_dtype,
     resample_abs_pos_embed,
     resample_patch_embed,
     set_layer_config,
@@ -21,6 +30,119 @@ torch_backend = os.environ.get('TORCH_BACKEND')
 if torch_backend is not None:
     importlib.import_module(torch_backend)
 torch_device = os.environ.get('TORCH_DEVICE', 'cpu')
+
+
+def test_get_device_dtype_prefers_explicit_values():
+    module = nn.Linear(2, 2).to(dtype=torch.float64)
+
+    dd = get_device_dtype(module, dtype=torch.float16)
+
+    assert dd == {'device': module.weight.device, 'dtype': torch.float16}
+
+
+@pytest.mark.parametrize('hybrid', [False, True])
+def test_patch_embed_resize_preserves_parameter_flags(hybrid):
+    if hybrid:
+        module = HybridEmbed(nn.Conv2d(3, 8, 3, stride=2, padding=1), img_size=32, patch_size=4, embed_dim=16)
+    else:
+        module = PatchEmbed(img_size=32, patch_size=4, embed_dim=16)
+    module.eval()
+    module.proj.weight.requires_grad_(False)
+    module.set_input_size(patch_size=2)
+    assert not module.proj.training
+    assert not module.proj.weight.requires_grad
+    assert module.proj.bias.requires_grad
+    module(torch.randn(1, 3, 32, 32)).square().sum().backward()
+    assert module.proj.weight.grad is None
+    assert module.proj.bias.grad is not None
+
+
+def test_hybrid_embed_resize_preserves_backbone_modes():
+    backbone = nn.Sequential(nn.Conv2d(3, 8, 3, stride=2, padding=1), nn.BatchNorm2d(8))
+    module = HybridEmbed(backbone, img_size=32, patch_size=2, embed_dim=16).train()
+    backbone[1].eval()
+    calls = []
+    handle = backbone.register_forward_hook(lambda *_: calls.append(1))
+    try:
+        # Scalar sizes matching the current tuples should also be no-ops.
+        module.set_input_size(img_size=32, patch_size=2)
+        module.set_input_size(img_size=(32, 32), patch_size=(2, 2))
+        assert not calls
+        module.set_input_size(img_size=(64, 64))
+        assert len(calls) == 1
+        assert backbone.training and backbone[0].training
+        assert not backbone[1].training
+        assert backbone[1].num_batches_tracked.item() == 0
+        assert module.img_size == (64, 64)
+        assert module.feature_size == (32, 32)
+        assert module.grid_size == (16, 16)
+    finally:
+        handle.remove()
+
+
+def test_fast_rms_norm2d_returns_apex_result(monkeypatch):
+    x = torch.tensor([[[[1.0]], [[2.0]], [[4.0]]]])
+    weight = torch.tensor([0.5, 1.5, 3.0])
+    normalized_shape = [3]
+    eps = 1e-5
+    expected = torch.tensor([[[[10.0]], [[20.0]], [[30.0]]]])
+
+    monkeypatch.setattr(fast_norm, 'has_apex_rmsnorm', True)
+    monkeypatch.setattr(
+        fast_norm,
+        'fused_rms_norm_affine',
+        lambda x, weight, normalized_shape, eps: expected.permute(0, 2, 3, 1),
+        raising=False,
+    )
+
+    actual = fast_norm.fast_rms_norm2d(x, normalized_shape, weight, eps)
+
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    'head_cls,head_kwargs,input_shape,pool_type',
+    [
+        (ClassifierHead, {}, (2, 4, 3, 3), 'avgmax'),
+        (NormMlpClassifierHead, {'hidden_size': 3}, (2, 4, 3, 3), ''),
+        (ClNormMlpClassifierHead, {'hidden_size': 3}, (2, 3, 3, 4), 'avgmax'),
+    ],
+)
+def test_classifier_head_reset_preserves_dtype(head_cls, head_kwargs, input_shape, pool_type):
+    head = head_cls(4, 3, **head_kwargs).to(dtype=torch.float64)
+    head.reset(2, pool_type)
+
+    parent = nn.Module()
+    parent.register_parameter('anchor', nn.Parameter(torch.ones(1, dtype=torch.float64)))
+    parent.add_module('head', head)
+    parent.eval()
+
+    parent.head.reset(0, pool_type, **get_device_dtype(parent))
+    parent.head.reset(2, pool_type, **get_device_dtype(parent))
+
+    assert all(parameter.dtype == torch.float64 for parameter in parent.head.parameters())
+    assert all(not module.training for module in parent.head.modules())
+    assert parent.head(torch.randn(input_shape, dtype=torch.float64)).dtype == torch.float64
+
+
+@pytest.mark.parametrize(
+    'head_cls,head_kwargs',
+    [
+        (AttentionPool2d, {'feat_size': 3}),
+        (RotAttentionPool2d, {'ref_feat_size': 3}),
+    ],
+)
+def test_attention_pool_head_reset_uses_parent_dtype(head_cls, head_kwargs):
+    parent = nn.Module()
+    parent.register_parameter('anchor', nn.Parameter(torch.ones(1, dtype=torch.float64)))
+    parent.add_module('head', head_cls(4, out_features=3, head_dim=2, **head_kwargs))
+    parent.eval()
+
+    parent.head.reset(0, **get_device_dtype(parent))
+    parent.head.reset(2, **get_device_dtype(parent))
+
+    assert parent.head.proj.weight.dtype == torch.float64
+    assert all(not module.training for module in parent.head.modules())
 
 
 def test_resample_abs_pos_embed_same_token_count_different_grid():

@@ -237,7 +237,7 @@ class OptimizerRegistry:
             fallback_list: Collection[str] = (),
             fallback_no_weight_decay: bool = False,
             layer_decay: Optional[float] = None,
-            layer_decay_min_scale: Optional[float] = None,
+            layer_decay_min_scale: float = 0.0,
             layer_decay_no_opt_scale: Optional[float] = None,
             param_group_fn: Optional[Callable[[nn.Module], ParamsT]] = None,
             **kwargs: Any,
@@ -462,21 +462,25 @@ def _register_adam_variants(registry: OptimizerRegistry) -> None:
             name='adafactor',
             opt_class=Adafactor,
             description='Memory-efficient implementation of Adam with factored gradients',
+            has_betas=True,
         ),
         OptimInfo(
             name='adafactorbv',
             opt_class=AdafactorBigVision,
             description='Big Vision variant of Adafactor with factored gradients, half precision momentum',
+            has_momentum=True,
         ),
         OptimInfo(
             name='adopt',
             opt_class=Adopt,
             description='Modified Adam that can converge with any β2 with the optimal rate',
+            has_betas=True,
         ),
         OptimInfo(
             name='adoptw',
             opt_class=Adopt,
             description='Modified AdamW (decoupled decay) that can converge with any β2 with the optimal rate',
+            has_betas=True,
             defaults={'decoupled': True}
         ),
     ]
@@ -575,6 +579,7 @@ def _register_corrected_decay_optimizers(registry: OptimizerRegistry) -> None:
             name='adoptc',
             opt_class=Adopt,
             description='Adopt with corrected decoupled weight decay (lr²/max_lr scaling)',
+            has_betas=True,
             defaults={'decoupled': True, 'corrected_weight_decay': True}
         ),
         OptimInfo(
@@ -588,6 +593,7 @@ def _register_corrected_decay_optimizers(registry: OptimizerRegistry) -> None:
             name='kronc',
             opt_class=Kron,
             description='PSGD Kron with corrected decoupled weight decay (lr²/max_lr scaling)',
+            has_eps=False,
             has_momentum=True,
             defaults={'decoupled_decay': True, 'corrected_weight_decay': True}
         ),
@@ -614,9 +620,17 @@ def _register_corrected_decay_optimizers(registry: OptimizerRegistry) -> None:
             defaults={'alpha': 0.9, 'decoupled_decay': True, 'corrected_weight_decay': True}
         ),
         OptimInfo(
+            name='novogradc',
+            opt_class=NvNovoGrad,
+            description='NovoGrad with corrected decoupled weight decay (lr²/max_lr scaling)',
+            has_betas=True,
+            defaults={'decoupled_decay': True, 'corrected_weight_decay': True}
+        ),
+        OptimInfo(
             name='adafactorbvc',
             opt_class=AdafactorBigVision,
             description='Adafactor Big Vision with corrected weight decay (lr²/max_lr or lr/max_lr scaling)',
+            has_momentum=True,
             defaults={'corrected_weight_decay': True}
         ),
     ]
@@ -636,6 +650,7 @@ def _register_corrected_decay_optimizers(registry: OptimizerRegistry) -> None:
             name='cadoptc',
             opt_class=Adopt,
             description='Cautious Adopt with corrected decoupled weight decay (lr²/max_lr scaling)',
+            has_betas=True,
             defaults={'decoupled': True, 'caution': True, 'corrected_weight_decay': True}
         ),
         OptimInfo(
@@ -665,6 +680,7 @@ def _register_corrected_decay_optimizers(registry: OptimizerRegistry) -> None:
             name='cadafactorbvc',
             opt_class=AdafactorBigVision,
             description='Cautious Adafactor Big Vision with corrected weight decay',
+            has_momentum=True,
             defaults={'caution': True, 'corrected_weight_decay': True}
         ),
     ]
@@ -678,12 +694,15 @@ def _register_cautious_optimizers(registry: OptimizerRegistry) -> None:
             name='cadafactor',
             opt_class=Adafactor,
             description='Cautious Adafactor',
-            defaults={'caution': True}
+            has_betas=True,
+            # caution is applied to the first moment, enable it (beta1) by default
+            defaults={'caution': True, 'betas': (0.9, 0.999)}
         ),
         OptimInfo(
             name='cadafactorbv',
             opt_class=AdafactorBigVision,
             description='Cautious Big Vision Adafactor',
+            has_momentum=True,
             defaults={'caution': True}
         ),
         OptimInfo(
@@ -697,6 +716,7 @@ def _register_cautious_optimizers(registry: OptimizerRegistry) -> None:
             name='cadopt',
             opt_class=Adopt,
             description='Cautious Adopt',
+            has_betas=True,
             defaults={'caution': True}
         ),
         OptimInfo(
@@ -719,6 +739,7 @@ def _register_cautious_optimizers(registry: OptimizerRegistry) -> None:
             name='cadoptw',
             opt_class=Adopt,
             description='Cautious AdoptW (decoupled decay)',
+            has_betas=True,
             defaults={'decoupled': True, 'caution': True}
         ),
         OptimInfo(
@@ -937,6 +958,13 @@ def _register_other_optimizers(registry: OptimizerRegistry) -> None:
             has_betas=True
         ),
         OptimInfo(
+            name='novogradw',
+            opt_class=NvNovoGrad,
+            description='NovoGrad with decoupled weight decay',
+            has_betas=True,
+            defaults={'decoupled_decay': True}
+        ),
+        OptimInfo(
             name='rmsprop',
             opt_class=torch.optim.RMSprop,
             description='torch.optim.RMSprop, Root Mean Square Propagation',
@@ -949,6 +977,13 @@ def _register_other_optimizers(registry: OptimizerRegistry) -> None:
             description='TensorFlow-style RMSprop implementation, Root Mean Square Propagation',
             has_momentum=True,
             defaults={'alpha': 0.9}
+        ),
+        OptimInfo(
+            name='rmsproptfw',
+            opt_class=RMSpropTF,
+            description='TensorFlow-style RMSprop with decoupled weight decay',
+            has_momentum=True,
+            defaults={'alpha': 0.9, 'decoupled_decay': True}
         ),
     ]
     for opt in other_optimizers:

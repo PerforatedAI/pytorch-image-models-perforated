@@ -1,5 +1,8 @@
 """ ConViT Model
 
+Papers:
+* `ConViT: Improving Vision Transformers with Soft Convolutional Inductive Biases` - https://arxiv.org/abs/2103.10697
+
 @article{d2021convit,
   title={ConViT: Improving Vision Transformers with Soft Convolutional Inductive Biases},
   author={d'Ascoli, St{\'e}phane and Touvron, Hugo and Leavitt, Matthew and Morcos, Ari and Biroli, Giulio and Sagun, Levent},
@@ -7,7 +10,6 @@
   year={2021}
 }
 
-Paper link: https://arxiv.org/abs/2103.10697
 Original code: https://github.com/facebookresearch/convit, original copyright below
 
 Modifications and additions for timm hacked together by / Copyright 2021, Ross Wightman
@@ -27,7 +29,7 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import DropPath, calculate_drop_path_rates, trunc_normal_, PatchEmbed, Mlp, LayerNorm, HybridEmbed
+from timm.layers import DropPath, calculate_drop_path_rates, trunc_normal_, PatchEmbed, Mlp, LayerNorm, HybridEmbed, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features_fx import register_notrace_module
 from ._registry import register_model, generate_default_cfgs
@@ -65,7 +67,9 @@ class GPSA(nn.Module):
         self.pos_proj = nn.Linear(3, num_heads, **dd)
         self.proj_drop = nn.Dropout(proj_drop)
         self.gating_param = nn.Parameter(torch.ones(self.num_heads, **dd))
-        self.rel_indices: torch.Tensor = torch.zeros(1, 1, 1, 3, **dd)  # silly torchscript hack, won't work with None
+        # registered as a non-persistent buffer (rather than a plain attribute) so nn.Module.to()
+        # keeps it in sync with the rest of the module's device/dtype between forward calls
+        self.register_buffer('rel_indices', torch.zeros(1, 1, 1, 3, **dd), persistent=False)
 
     def forward(self, x):
         B, N, C = x.shape
@@ -133,6 +137,10 @@ class GPSA(nn.Module):
         device = self.qk.weight.device
         dtype = self.qk.weight.dtype
         return rel_indices.to(device=device, dtype=dtype)
+
+    def init_non_persistent_buffers(self) -> None:
+        """Recompute the cached relative position indices for the current resolution."""
+        self.rel_indices = self.get_rel_indices(self.rel_indices.shape[1])
 
 
 class MHSA(nn.Module):
@@ -339,7 +347,7 @@ class ConVit(nn.Module):
         self.norm = norm_layer(embed_dim, **dd)
 
         # Classifier head
-        self.feature_info = [dict(num_chs=embed_dim, reduction=0, module='head')]
+        self.feature_info = [dict(num_chs=embed_dim, reduction=patch_size, module='head')]
         self.head_drop = nn.Dropout(drop_rate)
         self.head = nn.Linear(embed_dim, num_classes, **dd) if num_classes > 0 else nn.Identity()
 
@@ -378,11 +386,13 @@ class ConVit(nn.Module):
         return self.head
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
         if global_pool is not None:
             assert global_pool in ('', 'token', 'avg')
             self.global_pool = global_pool
-        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(self.embed_dim, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head.train(self.training)
 
     def forward_features(self, x):
         x = self.patch_embed(x)

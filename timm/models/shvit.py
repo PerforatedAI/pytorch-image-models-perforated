@@ -1,7 +1,9 @@
 """SHViT
-SHViT: Single-Head Vision Transformer with Memory Efficient Macro Design
+
+Papers:
+* `SHViT: Single-Head Vision Transformer with Memory Efficient Macro Design` - https://arxiv.org/abs/2401.16456
+
 Code: https://github.com/ysj9909/SHViT
-Paper: https://arxiv.org/abs/2401.16456
 
 @inproceedings{yun2024shvit,
   author={Yun, Seokju and Ro, Youngmin},
@@ -18,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import GroupNorm1, SqueezeExcite, SelectAdaptivePool2d, LayerType, trunc_normal_
+from timm.layers import GroupNorm1, SqueezeExcite, SelectAdaptivePool2d, LayerType, trunc_normal_, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._manipulate import checkpoint_seq
@@ -366,12 +368,18 @@ class SHViT(nn.Module):
     def get_classifier(self) -> nn.Module:
         return self.head.l
 
-    def reset_classifier(self, num_classes: int, global_pool: str = 'avg'):
+    def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
+        if global_pool is None:
+            global_pool = self.global_pool.pool_type
         # cannot meaningfully change pooling of efficient head after creation
         self.global_pool = SelectAdaptivePool2d(pool_type=global_pool)
+        self.global_pool.train(self.training)
         self.flatten = nn.Flatten(1) if global_pool else nn.Identity()  # don't flatten if pooling disabled
-        self.head = NormLinear(self.head_hidden_size, num_classes) if num_classes > 0 else nn.Identity()
+        self.flatten.train(self.training)
+        self.head = NormLinear(self.head_hidden_size, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head.train(self.training)
 
     def forward_intermediates(
             self,

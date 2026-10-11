@@ -1,7 +1,8 @@
 """ EdgeNeXt
 
-Paper: `EdgeNeXt: Efficiently Amalgamated CNN-Transformer Architecture for Mobile Vision Applications`
- - https://arxiv.org/abs/2206.10589
+Papers:
+* `EdgeNeXt: Efficiently Amalgamated CNN-Transformer Architecture for Mobile Vision Applications` - https://arxiv.org/abs/2206.10589
+* `Solving ImageNet: a Unified Scheme for Training any Backbone to Top Results` - https://arxiv.org/abs/2204.03475 (USI)
 
 Original code and weights from https://github.com/mmaaz60/EdgeNeXt
 
@@ -17,6 +18,7 @@ from torch import nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import (
+    get_device_dtype,
     DropPath,
     calculate_drop_path_rates,
     LayerNorm2d,
@@ -478,8 +480,9 @@ class EdgeNeXt(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_intermediates(
             self,

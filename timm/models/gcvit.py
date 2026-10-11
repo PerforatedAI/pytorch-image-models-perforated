@@ -2,7 +2,8 @@
 
 From scratch implementation of GCViT in the style of timm swin_transformer_v2_cr.py
 
-Global Context Vision Transformers -https://arxiv.org/abs/2206.09959
+Papers:
+* `Global Context Vision Transformers` - https://arxiv.org/abs/2206.09959
 
 @article{hatamizadeh2022global,
   title={Global Context Vision Transformers},
@@ -28,6 +29,7 @@ import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import (
+    get_device_dtype,
     DropPath,
     calculate_drop_path_rates,
     to_2tuple,
@@ -524,11 +526,12 @@ class GlobalContextVit(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None, device=None, dtype=None):
-        dd = {'device': device, 'dtype': dtype}
+        dd = get_device_dtype(self, device=device, dtype=dtype)
         self.num_classes = num_classes
         if global_pool is None:
             global_pool = self.head.global_pool.pool_type
         self.head = ClassifierHead(self.num_features, num_classes, pool_type=global_pool, drop_rate=self.drop_rate, **dd)
+        self.head.train(self.training)
 
     def forward_intermediates(
             self,

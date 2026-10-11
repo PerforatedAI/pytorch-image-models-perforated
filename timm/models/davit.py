@@ -1,6 +1,8 @@
 """ DaViT: Dual Attention Vision Transformers
 
-As described in https://arxiv.org/abs/2204.03645
+Papers:
+* `DaViT: Dual Attention Vision Transformers` - https://arxiv.org/abs/2204.03645
+* `Florence-2: Advancing a Unified Representation for a Variety of Vision Tasks` - https://arxiv.org/abs/2311.06242
 
 Input size invariant transformer architecture that combines channel and spacial
 attention in each block. The attention mechanisms used are linear in complexity.
@@ -20,7 +22,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import DropPath, calculate_drop_path_rates, to_2tuple, trunc_normal_, Mlp, LayerNorm2d, get_norm_layer, use_fused_attn
+from timm.layers import DropPath, calculate_drop_path_rates, to_2tuple, trunc_normal_, Mlp, LayerNorm2d, get_norm_layer, use_fused_attn, get_device_dtype
 from timm.layers import NormMlpClassifierHead, ClassifierHead
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
@@ -699,8 +701,9 @@ class DaVit(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_intermediates(
             self,

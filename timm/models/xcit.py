@@ -1,7 +1,7 @@
 """ Cross-Covariance Image Transformer (XCiT) in PyTorch
 
-Paper:
-    - https://arxiv.org/abs/2106.09681
+Papers:
+    - `XCiT: Cross-Covariance Image Transformers` - https://arxiv.org/abs/2106.09681
 
 Same as the official implementation, with some minor adaptations, original copyright below
     - https://github.com/facebookresearch/xcit/blob/master/xcit.py
@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import DropPath, trunc_normal_, to_2tuple, use_fused_attn, Mlp
+from timm.layers import DropPath, trunc_normal_, to_2tuple, use_fused_attn, Mlp, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._features_fx import register_notrace_module
@@ -394,7 +394,7 @@ class Xcit(nn.Module):
             num_heads (int): number of attention heads
             mlp_ratio (int): ratio of mlp hidden dim to embedding dim
             qkv_bias (bool): enable bias for qkv if True
-            drop_rate (float): dropout rate after positional embedding, and in XCA/CA projection + MLP
+            drop_rate (float): head dropout rate
             pos_drop_rate: position embedding dropout rate
             proj_drop_rate (float): projection dropout rate
             attn_drop_rate (float): attention dropout rate
@@ -464,7 +464,7 @@ class Xcit(nn.Module):
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
-                proj_drop=drop_rate,
+                proj_drop=proj_drop_rate,
                 attn_drop=attn_drop_rate,
                 act_layer=act_layer,
                 norm_layer=norm_layer,
@@ -491,7 +491,8 @@ class Xcit(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'pos_embed', 'cls_token'}
+        # the positional encoding is a module (Fourier features + projection), exclude all of its params
+        return {'pos_embed.*', 'cls_token'}
 
     @torch.jit.ignore
     def group_matcher(self, coarse=False):
@@ -510,13 +511,13 @@ class Xcit(nn.Module):
         return self.head
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
         if global_pool is not None:
             assert global_pool in ('', 'avg', 'token')
             self.global_pool = global_pool
-        device = self.head.weight.device if hasattr(self.head, 'weight') else None
-        dtype = self.head.weight.dtype if hasattr(self.head, 'weight') else None
-        self.head = nn.Linear(self.num_features, num_classes, device=device, dtype=dtype) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(self.num_features, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head.train(self.training)
 
     def forward_intermediates(
             self,

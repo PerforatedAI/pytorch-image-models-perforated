@@ -4,11 +4,8 @@ Ported to pytorch thanks to [tstandley](https://github.com/tstandley/Xception-Py
 @author: tstandley
 Adapted by cadene
 
-Creates an Xception Model as defined in:
-
-Francois Chollet
-Xception: Deep Learning with Depthwise Separable Convolutions
-https://arxiv.org/pdf/1610.02357.pdf
+Creates an Xception Model as defined in (Francois Chollet):
+* `Xception: Deep Learning with Depthwise Separable Convolutions` - https://arxiv.org/abs/1610.02357
 
 This weights ported from the Keras implementation. Achieves the following performance on the validation set:
 
@@ -26,7 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
-from timm.layers import create_classifier
+from timm.layers import create_classifier, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._registry import register_model, generate_default_cfgs, register_model_deprecations
 
@@ -216,9 +213,14 @@ class Xception(nn.Module):
     def get_classifier(self) -> nn.Module:
         return self.fc
 
-    def reset_classifier(self, num_classes: int, global_pool: str = 'avg'):
+    def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.global_pool, self.fc = create_classifier(self.num_features, self.num_classes, pool_type=global_pool)
+        if global_pool is None:
+            global_pool = self.global_pool.pool_type
+        self.global_pool, self.fc = create_classifier(self.num_features, self.num_classes, pool_type=global_pool, **dd)
+        self.global_pool.train(self.training)
+        self.fc.train(self.training)
 
     def forward_features(self, x):
         x = self.conv1(x)
@@ -254,7 +256,7 @@ class Xception(nn.Module):
     def forward_head(self, x, pre_logits: bool = False):
         x = self.global_pool(x)
         if self.drop_rate:
-            F.dropout(x, self.drop_rate, training=self.training)
+            x = F.dropout(x, self.drop_rate, training=self.training)
         return x if pre_logits else self.fc(x)
 
     def forward(self, x):

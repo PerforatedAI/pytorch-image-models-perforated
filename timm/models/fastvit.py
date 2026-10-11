@@ -5,6 +5,15 @@
 # For licensing see accompanying LICENSE file at https://github.com/apple/ml-fastvit/tree/main
 # Original work is copyright (C) 2023 Apple Inc. All Rights Reserved.
 #
+""" FastViT
+
+Includes the MobileCLIP image encoders (fastvit_mci*).
+
+Papers:
+    * `FastViT: A Fast Hybrid Vision Transformer using Structural Reparameterization` - https://arxiv.org/abs/2303.14189
+    * `MobileCLIP: Fast Image-Text Models through Multi-Modal Reinforced Training` - https://arxiv.org/abs/2311.17049
+    * `MobileCLIP2: Improving Multi-Modal Reinforced Training` - https://arxiv.org/abs/2508.20691
+"""
 import os
 from functools import partial
 from typing import List, Optional, Tuple, Type, Union
@@ -14,6 +23,7 @@ import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 from timm.layers import (
+    get_device_dtype,
     DropPath,
     calculate_drop_path_rates,
     trunc_normal_,
@@ -1206,6 +1216,7 @@ class FastVit(nn.Module):
     ) -> None:
         super().__init__()
         dd = {'device': device, 'dtype': dtype}
+        self.in_chans = in_chans
         self.num_classes = 0 if fork_feat else num_classes
         self.fork_feat = fork_feat
         self.global_pool = global_pool
@@ -1331,8 +1342,9 @@ class FastVit(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_intermediates(
             self,

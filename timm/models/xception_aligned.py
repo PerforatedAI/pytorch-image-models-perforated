@@ -3,6 +3,10 @@
 This is a correct, from scratch impl of Aligned Xception (Deeplab) models compatible with TF weights at
 https://github.com/tensorflow/models/blob/master/research/deeplab/g3doc/model_zoo.md
 
+Papers:
+* `Xception: Deep Learning with Depthwise Separable Convolutions` - https://arxiv.org/abs/1610.02357
+* `Encoder-Decoder with Atrous Separable Convolution for Semantic Image Segmentation` - https://arxiv.org/abs/1802.02611
+
 Hacked together by / Copyright 2020 Ross Wightman
 """
 from functools import partial
@@ -12,7 +16,7 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
-from timm.layers import ClassifierHead, ConvNormAct, DropPath, PadType, create_conv2d, get_norm_act_layer
+from timm.layers import ClassifierHead, ConvNormAct, DropPath, PadType, create_conv2d, get_norm_act_layer, get_device_dtype
 from timm.layers.helpers import to_3tuple
 from ._builder import build_model_with_cfg
 from ._manipulate import checkpoint_seq
@@ -322,8 +326,9 @@ class XceptionAligned(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, pool_type=global_pool)
+        self.head.reset(num_classes, pool_type=global_pool, **dd)
 
     def forward_features(self, x):
         x = self.stem(x)

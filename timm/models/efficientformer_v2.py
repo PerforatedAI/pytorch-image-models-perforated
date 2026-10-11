@@ -1,5 +1,8 @@
 """ EfficientFormer-V2
 
+Papers:
+* `Rethinking Vision Transformers for MobileNet Size and Speed` - https://arxiv.org/abs/2212.08059
+
 @article{
     li2022rethinking,
     title={Rethinking Vision Transformers for MobileNet Size and Speed},
@@ -23,6 +26,7 @@ import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import (
+    get_device_dtype,
     create_conv2d,
     create_norm_layer,
     get_act_layer,
@@ -165,8 +169,12 @@ class Attention2d(torch.nn.Module):
     @torch.no_grad()
     def train(self, mode=True):
         super().train(mode)
-        if mode and self.attention_bias_cache:
+        if self.attention_bias_cache:
             self.attention_bias_cache = {}  # clear ab cache
+
+    def _apply(self, fn, *args, **kwargs):
+        self.attention_bias_cache = {}
+        return super()._apply(fn, *args, **kwargs)
 
     def reset_parameters(self) -> None:
         """Initialize parameters and buffers."""
@@ -306,8 +314,12 @@ class Attention2dDownsample(torch.nn.Module):
     @torch.no_grad()
     def train(self, mode=True):
         super().train(mode)
-        if mode and self.attention_bias_cache:
+        if self.attention_bias_cache:
             self.attention_bias_cache = {}  # clear ab cache
+
+    def _apply(self, fn, *args, **kwargs):
+        self.attention_bias_cache = {}
+        return super()._apply(fn, *args, **kwargs)
 
     def reset_parameters(self) -> None:
         """Initialize parameters and buffers."""
@@ -757,11 +769,14 @@ class EfficientFormerV2(nn.Module):
         return self.head, self.head_dist
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
         if global_pool is not None:
             self.global_pool = global_pool
-        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
-        self.head_dist = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(self.num_features, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head.train(self.training)
+        self.head_dist = nn.Linear(self.num_features, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head_dist.train(self.training)
 
     @torch.jit.ignore
     def set_distilled_training(self, enable=True):

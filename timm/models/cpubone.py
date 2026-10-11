@@ -4,6 +4,9 @@ CPUBone: Efficient Vision Backbone Design for Devices with Low Parallelization C
 Moritz Nottebaum, Matteo Dunnhofer, Christian Micheloni
 Conference on Computer Vision and Pattern Recognition (CVPR) Findings, 2026
 
+Papers:
+* `CPUBone: Efficient Vision Backbone Design for Devices with Low Parallelization Capabilities` - https://arxiv.org/abs/2603.26425
+
 Adapted from the original implementation at https://github.com/altair199797/CPUBone.
 
 Special thanks to Simon Kundrat for initiating integration of CPUBone into the library. Most of the content was done by him.
@@ -16,7 +19,7 @@ import torch.nn.functional as F
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import DropPath, GroupNorm1, LayerType, calculate_drop_path_rates, get_act_layer, get_norm_layer, \
-    use_fused_attn
+    get_device_dtype, use_fused_attn
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._features_fx import register_notrace_module
@@ -89,12 +92,15 @@ class LinearLayer(nn.Module):
             dropout: float = 0.,
             norm_layer: Optional[Type[nn.Module]] = None,
             act_layer: Optional[Type[nn.Module]] = None,
+            device=None,
+            dtype=None,
     ):
+        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         self.dropout = nn.Dropout(dropout, inplace=False) if dropout > 0 else None
-        self.linear = nn.Linear(in_features, out_features, use_bias)
+        self.linear = nn.Linear(in_features, out_features, use_bias, **dd)
         # note: covers nn.LayerNorm, whose first arg is normalized_shape rather than num_features
-        self.norm = norm_layer(out_features) if norm_layer is not None else None
+        self.norm = norm_layer(out_features, **dd) if norm_layer is not None else None
         self.act = act_layer() if act_layer is not None else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -144,7 +150,10 @@ class ConvLayer(nn.Module):
             use_bias: bool = False,
             norm_layer: Optional[Type[nn.Module]] = nn.BatchNorm2d,
             act_layer: Optional[Type[nn.Module]] = nn.ReLU,
+            device=None,
+            dtype=None,
     ):
+        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         padding = get_same_padding(kernel_size, stride)
         if padding == -1:
@@ -159,6 +168,7 @@ class ConvLayer(nn.Module):
                     padding=0,
                     groups=groups,
                     bias=use_bias,
+                    **dd,
                 ),
             )
         else:
@@ -170,8 +180,9 @@ class ConvLayer(nn.Module):
                 padding=padding,
                 groups=groups,
                 bias=use_bias,
+                **dd,
             )
-        self.norm = norm_layer(out_channels) if norm_layer is not None else None
+        self.norm = norm_layer(out_channels, **dd) if norm_layer is not None else None
         self.act = act_layer() if act_layer is not None else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -196,7 +207,10 @@ class MBConv(nn.Module):
             use_bias: Tuple[bool, bool, bool] = (False, False, False),
             norm_layer: Tuple[Optional[Type[nn.Module]], ...] = (nn.BatchNorm2d, nn.BatchNorm2d, nn.BatchNorm2d),
             act_layer: Tuple[Optional[Type[nn.Module]], ...] = (nn.ReLU6, nn.ReLU6, None),
+            device=None,
+            dtype=None,
     ):
+        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         mid_channels = mid_channels or round(in_channels * expand_ratio)
 
@@ -210,6 +224,7 @@ class MBConv(nn.Module):
             norm_layer=norm_layer[0],
             act_layer=act_layer[0],
             use_bias=use_bias[0],
+            **dd,
         )
         # depthwise
         self.depth_conv = ConvLayer(
@@ -221,6 +236,7 @@ class MBConv(nn.Module):
             norm_layer=norm_layer[1],
             act_layer=act_layer[1],
             use_bias=use_bias[1],
+            **dd,
         )
         # pointwise project
         self.point_conv = ConvLayer(
@@ -231,6 +247,7 @@ class MBConv(nn.Module):
             norm_layer=norm_layer[2],
             act_layer=act_layer[2],
             use_bias=use_bias[2],
+            **dd,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -253,7 +270,10 @@ class FusedMBConv(nn.Module):
             use_bias: Tuple[bool, bool] = (False, False),
             norm_layer: Tuple[Optional[Type[nn.Module]], ...] = (nn.BatchNorm2d, nn.BatchNorm2d),
             act_layer: Tuple[Optional[Type[nn.Module]], ...] = (nn.ReLU6, None),
+            device=None,
+            dtype=None,
     ):
+        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         mid_channels = mid_channels or round(in_channels * expand_ratio)
 
@@ -266,6 +286,7 @@ class FusedMBConv(nn.Module):
             use_bias=use_bias[0],
             norm_layer=norm_layer[0],
             act_layer=act_layer[0],
+            **dd,
         )
         self.point_conv = ConvLayer(
             mid_channels,
@@ -275,6 +296,7 @@ class FusedMBConv(nn.Module):
             use_bias=use_bias[1],
             norm_layer=norm_layer[1],
             act_layer=act_layer[1],
+            **dd,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -298,7 +320,10 @@ class ConvAttention(nn.Module):
             fuse_out_proj: bool = False,
             small_kernels: bool = False,
             upsample_mode: str = 'transpose',
+            device=None,
+            dtype=None,
     ):
+        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         self.num_heads = int(max(1, (input_dim * head_dim_mul) // 30))
         self.head_dim = int((input_dim // self.num_heads) * head_dim_mul)
@@ -318,8 +343,9 @@ class ConvAttention(nn.Module):
             groups=input_dim,
             norm_layer=nn.BatchNorm2d,
             act_layer=None,
+            **dd,
         )
-        self.pwise = nn.Conv2d(input_dim, total_dim, kernel_size=1, stride=1, padding=0, bias=False)
+        self.pwise = nn.Conv2d(input_dim, total_dim, kernel_size=1, stride=1, padding=0, bias=False, **dd)
 
         self.o_proj_inpdim = self.head_dim * self.num_heads
         # With fuse_out_proj the output projection is folded into the upsampling module below, which
@@ -327,28 +353,50 @@ class ConvAttention(nn.Module):
         if fuse_out_proj:
             self.o_proj = nn.Identity()
         else:
-            self.o_proj = nn.Conv2d(self.o_proj_inpdim, input_dim, kernel_size=1, stride=1, padding=0)
+            self.o_proj = nn.Conv2d(self.o_proj_inpdim, input_dim, kernel_size=1, stride=1, padding=0, **dd)
 
         if upsample_mode == 'nearest':
             upsampling = [nn.Upsample(scale_factor=att_stride, mode="nearest") if att_stride > 1 else nn.Identity()]
             if fuse_out_proj:
-                upsampling = [nn.Conv2d(self.o_proj_inpdim, input_dim, kernel_size=1, stride=1, padding=0)] + upsampling
+                upsampling = [
+                    nn.Conv2d(self.o_proj_inpdim, input_dim, kernel_size=1, stride=1, padding=0, **dd)
+                ] + upsampling
             self.upsampling = nn.Sequential(*upsampling)
         elif fuse_out_proj:
             if att_stride == 1:
-                self.upsampling = nn.ConvTranspose2d(self.o_proj_inpdim, input_dim, kernel_size=3, stride=1, padding=1)
+                self.upsampling = nn.ConvTranspose2d(
+                    self.o_proj_inpdim, input_dim, kernel_size=3, stride=1, padding=1, **dd
+                )
             else:
                 self.upsampling = nn.ConvTranspose2d(
-                    self.o_proj_inpdim, input_dim,
-                    kernel_size=att_stride * 2, stride=att_stride, padding=att_stride // 2)
+                    self.o_proj_inpdim,
+                    input_dim,
+                    kernel_size=att_stride * 2,
+                    stride=att_stride,
+                    padding=att_stride // 2,
+                    **dd,
+                )
         else:
             if att_stride == 1:
                 self.upsampling = nn.ConvTranspose2d(
-                    input_dim, input_dim, kernel_size=3, stride=1, padding=1, groups=input_dim)
+                    input_dim,
+                    input_dim,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    groups=input_dim,
+                    **dd,
+                )
             else:
                 self.upsampling = nn.ConvTranspose2d(
-                    input_dim, input_dim,
-                    kernel_size=att_stride * 2, stride=att_stride, padding=att_stride // 2, groups=input_dim)
+                    input_dim,
+                    input_dim,
+                    kernel_size=att_stride * 2,
+                    stride=att_stride,
+                    padding=att_stride // 2,
+                    groups=input_dim,
+                    **dd,
+                )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         H, W = x.shape[-2:]
@@ -401,7 +449,10 @@ class CPUBoneBlock(nn.Module):
             proj_drop: float = 0.1,
             drop_path: float = 0.,
             local_mbconv_norm: str = 'proj',
+            device=None,
+            dtype=None,
     ):
+        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         _check_local_mbconv_norm(local_mbconv_norm)
         att_kernel = 5 if att_stride > 1 else 3
@@ -414,14 +465,15 @@ class CPUBoneBlock(nn.Module):
             fuse_out_proj=fused_conv,
             small_kernels=small_kernels,
             upsample_mode=attn_upsample,
+            **dd,
         )
 
-        context_module = ResidualBlock(nn.Sequential(GroupNorm1(in_channels), block), nn.Identity(), drop_path)
+        context_module = ResidualBlock(nn.Sequential(GroupNorm1(in_channels, **dd), block), nn.Identity(), drop_path)
         mlp = nn.Sequential(
-            GroupNorm1(in_channels),
-            nn.Conv2d(in_channels, in_channels * mlp_ratio, kernel_size=1),
+            GroupNorm1(in_channels, **dd),
+            nn.Conv2d(in_channels, in_channels * mlp_ratio, kernel_size=1, **dd),
             nn.GELU(),
-            nn.Conv2d(in_channels * mlp_ratio, in_channels, kernel_size=1),
+            nn.Conv2d(in_channels * mlp_ratio, in_channels, kernel_size=1, **dd),
             nn.Dropout(p=proj_drop),
         )
         context_module = nn.Sequential(context_module, ResidualBlock(mlp, nn.Identity(), drop_path))
@@ -436,6 +488,7 @@ class CPUBoneBlock(nn.Module):
                 expand_groups=expand_groups,
                 norm_layer=(norm_layer, norm_layer),
                 act_layer=(act_layer, None),
+                **dd,
             )
         else:
             norm_mask = _LOCAL_MBCONV_NORM_MODES[local_mbconv_norm]
@@ -451,6 +504,7 @@ class CPUBoneBlock(nn.Module):
                 kernel_size=2 if small_kernels else 3,
                 norm_layer=local_norms,
                 act_layer=(act_layer, act_layer, None),
+                **dd,
             )
 
         self.total = nn.Sequential(context_module, ResidualBlock(local_module, nn.Identity(), drop_path))
@@ -469,32 +523,46 @@ class ClsHead(nn.Module):
             dropout: float = 0.0,
             norm_layer: Type[nn.Module] = nn.BatchNorm2d,
             act_layer: Type[nn.Module] = nn.Hardswish,
+            device=None,
+            dtype=None,
     ):
+        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         _check_global_pool(global_pool)
         self.num_features = width_list[-1]
         self.dropout = dropout
         self.pool_type = global_pool
 
-        self.in_conv = ConvLayer(in_channels, width_list[0], 1, norm_layer=norm_layer, act_layer=act_layer)
+        self.in_conv = ConvLayer(in_channels, width_list[0], 1, norm_layer=norm_layer, act_layer=act_layer, **dd)
         self.global_pool = nn.AdaptiveAvgPool2d(output_size=1) if global_pool else nn.Identity()
         self.flatten = nn.Flatten(1) if global_pool else nn.Identity()
         self.pre_classifier = LinearLayer(
-            width_list[0], width_list[1], False, norm_layer=nn.LayerNorm, act_layer=act_layer)
+            width_list[0], width_list[1], False, norm_layer=nn.LayerNorm, act_layer=act_layer, **dd)
         self.classifier = (
-            LinearLayer(width_list[1], num_classes, True, dropout) if num_classes > 0 else nn.Identity()
+            LinearLayer(width_list[1], num_classes, True, dropout, **dd) if num_classes > 0 else nn.Identity()
         )
 
-    def reset(self, num_classes: int, global_pool: Optional[str] = None):
+    def reset(
+            self,
+            num_classes: int,
+            global_pool: Optional[str] = None,
+            device=None,
+            dtype=None,
+    ):
+        dd = get_device_dtype(self, device=device, dtype=dtype)
         if global_pool is not None:
             _check_global_pool(global_pool)
             self.pool_type = global_pool
             self.global_pool = nn.AdaptiveAvgPool2d(output_size=1) if global_pool else nn.Identity()
+            self.global_pool.train(self.training)
             self.flatten = nn.Flatten(1) if global_pool else nn.Identity()
+            self.flatten.train(self.training)
         if num_classes > 0:
-            self.classifier = LinearLayer(self.num_features, num_classes, True, self.dropout)
+            self.classifier = LinearLayer(self.num_features, num_classes, True, self.dropout, **dd)
+            self.classifier.train(self.training)
         else:
             self.classifier = nn.Identity()
+            self.classifier.train(self.training)
 
     def forward(self, x: torch.Tensor, pre_logits: bool = False) -> torch.Tensor:
         x = self.in_conv(x)
@@ -535,6 +603,8 @@ class CPUBone(nn.Module):
             small_kernels: bool = False,
             attn_upsample: str = 'transpose',
             local_mbconv_norm: str = 'proj',
+            device=None,
+            dtype=None,
     ) -> None:
         """
         Args:
@@ -574,6 +644,7 @@ class CPUBone(nn.Module):
         downsample_expand_ratios=(6, 6, 6, expand_ratio)`; `grouping` → `expand_groups`;
         `smallk_only_lasts` → `small_kernels`; `lose_transpose=True` → `attn_upsample='nearest'`.
         """
+        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         _check_global_pool(global_pool)
         assert attn_upsample in ('transpose', 'nearest')
@@ -582,6 +653,7 @@ class CPUBone(nn.Module):
         if downsample_expand_ratios is None:
             downsample_expand_ratios = (expand_ratio,) * num_stages
         assert len(downsample_expand_ratios) == num_stages
+        self.in_chans = in_chans
         self.num_classes = num_classes
         self.num_features = width_list[-1]
         self.head_hidden_size = head_widths[-1]
@@ -606,7 +678,7 @@ class CPUBone(nn.Module):
         # shortcut and ignore theirs)
         dpr = calculate_drop_path_rates(drop_path_rate, sum(depth_list))
 
-        self.stem, in_channels = self._build_stem(in_chans, width_list[0], depth_list[0], dpr[:depth_list[0]])
+        self.stem, in_channels = self._build_stem(in_chans, width_list[0], depth_list[0], dpr[:depth_list[0]], **dd)
         block_idx = depth_list[0]
 
         # stages 1-4: early stages use plain conv blocks, later stages add attention
@@ -616,9 +688,9 @@ class CPUBone(nn.Module):
             stage_dpr = dpr[block_idx:block_idx + depth]
             block_idx += depth
             if stage_num >= 3:
-                blocks, in_channels = self._build_attention_stage(in_channels, width, depth, stage_num, stage_dpr)
+                blocks, in_channels = self._build_attention_stage(in_channels, width, depth, stage_num, stage_dpr, **dd)
             else:
-                blocks, in_channels = self._build_conv_stage(in_channels, width, depth, stage_num, stage_dpr)
+                blocks, in_channels = self._build_conv_stage(in_channels, width, depth, stage_num, stage_dpr, **dd)
             stages.append(nn.Sequential(*blocks))
             self.feature_info.append(
                 dict(num_chs=in_channels, reduction=2 ** (stage_num + 1), module=f"stages.{stage_num - 1}"))
@@ -632,6 +704,7 @@ class CPUBone(nn.Module):
             dropout=drop_rate,
             norm_layer=self.norm_layer,
             act_layer=self.act_layer,
+            **dd,
         )
 
     def _build_stem(
@@ -640,8 +713,11 @@ class CPUBone(nn.Module):
             stem_width: int,
             depth: int,
             dpr: List[float],
+            device=None,
+            dtype=None,
     ) -> Tuple[nn.Sequential, int]:
         """Stem: downsample by 2, then `depth` local blocks at the stem width."""
+        dd = {'device': device, 'dtype': dtype}
         blocks = [
             ConvLayer(
                 in_channels=in_channels,
@@ -650,6 +726,7 @@ class CPUBone(nn.Module):
                 stride=2,
                 norm_layer=self.norm_layer,
                 act_layer=self.act_layer,
+                **dd,
             )
         ]
         in_channels = stem_width
@@ -663,6 +740,7 @@ class CPUBone(nn.Module):
                 expand_groups=self.expand_groups,
                 norm_layer=self.norm_layer,
                 act_layer=self.act_layer,
+                **dd,
             )
             blocks.append(ResidualBlock(block, nn.Identity(), dpr[i]))
         return nn.Sequential(*blocks), in_channels
@@ -674,8 +752,11 @@ class CPUBone(nn.Module):
             depth: int,
             stage_num: int,
             dpr: List[float],
+            device=None,
+            dtype=None,
     ) -> Tuple[List[nn.Module], int]:
         """Stages 1-2: `depth` plain conv blocks, downsampling (stride 2) on the first one."""
+        dd = {'device': device, 'dtype': dtype}
         blocks = []
         for i in range(depth):
             stride = 2 if i == 0 else 1
@@ -688,6 +769,7 @@ class CPUBone(nn.Module):
                 expand_groups=self.expand_groups,
                 norm_layer=self.norm_layer,
                 act_layer=self.act_layer,
+                **dd,
             )
             blocks.append(ResidualBlock(block, nn.Identity() if stride == 1 else None, dpr[i]))
             in_channels = width
@@ -700,8 +782,11 @@ class CPUBone(nn.Module):
             depth: int,
             stage_num: int,
             dpr: List[float],
+            device=None,
+            dtype=None,
     ) -> Tuple[List[nn.Module], int]:
         """Stages 3-4: one downsampling conv block, followed by `depth` CPUBoneBlocks (attention + local conv)."""
+        dd = {'device': device, 'dtype': dtype}
         downsample = self.build_local_block(
             in_channels=in_channels,
             out_channels=width,
@@ -711,6 +796,7 @@ class CPUBone(nn.Module):
             expand_groups=self.expand_groups,
             norm_layer=self.norm_layer,
             act_layer=self.act_layer,
+            **dd,
         )
         in_channels = width
         blocks = [ResidualBlock(downsample, None)]
@@ -730,6 +816,7 @@ class CPUBone(nn.Module):
                     proj_drop=self.proj_drop_rate,
                     drop_path=dpr[i],
                     local_mbconv_norm=self.local_mbconv_norm,
+                    **dd,
                 )
             )
         return blocks, in_channels
@@ -745,7 +832,10 @@ class CPUBone(nn.Module):
             fusedmbconv: bool = False,
             expand_groups: int = 1,
             kernel_size: int = 3,
+            device=None,
+            dtype=None,
     ) -> nn.Module:
+        dd = {'device': device, 'dtype': dtype}
         if fusedmbconv:
             block = FusedMBConv(
                 in_channels=in_channels,
@@ -757,6 +847,7 @@ class CPUBone(nn.Module):
                 expand_groups=expand_groups,
                 norm_layer=(norm_layer, norm_layer),
                 act_layer=(act_layer, None),
+                **dd,
             )
         else:
             block = MBConv(
@@ -769,6 +860,7 @@ class CPUBone(nn.Module):
                 use_bias=(False, False, False),
                 norm_layer=(None, None, norm_layer),
                 act_layer=(act_layer, act_layer, None),
+                **dd,
             )
         return block
 
@@ -788,11 +880,12 @@ class CPUBone(nn.Module):
         return self.head.classifier
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         if global_pool is not None:
             _check_global_pool(global_pool)
             self.global_pool = global_pool
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_intermediates(
             self,

@@ -2,8 +2,7 @@
 
 A PyTorch implement of Aggregating Nested Transformers as described in:
 
-'Aggregating Nested Transformers'
-    - https://arxiv.org/abs/2105.12723
+* `Nested Hierarchical Transformer: Towards Accurate, Data-Efficient and Interpretable Visual Understanding` - https://arxiv.org/abs/2105.12723
 
 The official Jax code is released and available at https://github.com/google-research/nested-transformer. The weights
 have been converted with convert/convert_nest_flax.py
@@ -27,6 +26,7 @@ from torch import nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import (
+    get_device_dtype,
     PatchEmbed,
     Mlp,
     DropPath,
@@ -440,7 +440,7 @@ class Nest(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {f'level.{i}.pos_embed' for i in range(len(self.levels))}
+        return {f'levels.{i}.pos_embed' for i in range(len(self.levels))}
 
     @torch.jit.ignore
     def group_matcher(self, coarse=False):
@@ -463,10 +463,15 @@ class Nest(nn.Module):
     def get_classifier(self) -> nn.Module:
         return self.head
 
-    def reset_classifier(self, num_classes: int, global_pool: str = 'avg'):
+    def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
+        if global_pool is None:
+            global_pool = self.global_pool.pool_type
         self.global_pool, self.head = create_classifier(
-            self.num_features, self.num_classes, pool_type=global_pool)
+            self.num_features, self.num_classes, pool_type=global_pool, **dd)
+        self.global_pool.train(self.training)
+        self.head.train(self.training)
 
     def forward_intermediates(
             self,

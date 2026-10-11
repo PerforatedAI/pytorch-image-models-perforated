@@ -1,6 +1,7 @@
 """ Visformer
 
-Paper: Visformer: The Vision-friendly Transformer - https://arxiv.org/abs/2104.12533
+Papers:
+* `Visformer: The Vision-friendly Transformer` - https://arxiv.org/abs/2104.12533
 
 From original at https://github.com/danczs/Visformer
 
@@ -12,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import to_2tuple, trunc_normal_, DropPath, calculate_drop_path_rates, PatchEmbed, LayerNorm2d, create_classifier, use_fused_attn
+from timm.layers import to_2tuple, trunc_normal_, DropPath, calculate_drop_path_rates, PatchEmbed, LayerNorm2d, create_classifier, use_fused_attn, get_device_dtype
 
 from ._builder import build_model_with_cfg
 from ._manipulate import checkpoint_seq
@@ -425,12 +426,15 @@ class Visformer(nn.Module):
     def get_classifier(self) -> nn.Module:
         return self.head
 
-    def reset_classifier(self, num_classes: int, global_pool: str = 'avg'):
+    def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        device = self.head.weight.device if hasattr(self.head, 'weight') else None
-        dtype = self.head.weight.dtype if hasattr(self.head, 'weight') else None
+        if global_pool is None:
+            global_pool = self.global_pool.pool_type
         self.global_pool, self.head = create_classifier(
-            self.num_features, self.num_classes, pool_type=global_pool, device=device, dtype=dtype)
+            self.num_features, self.num_classes, pool_type=global_pool, **dd)
+        self.global_pool.train(self.training)
+        self.head.train(self.training)
 
     def forward_features(self, x):
         if self.stem is not None:

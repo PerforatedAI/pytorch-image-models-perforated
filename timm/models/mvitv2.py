@@ -1,5 +1,8 @@
 """ Multi-Scale Vision Transformer v2
 
+Papers:
+* `MViTv2: Improved Multiscale Vision Transformers for Classification and Detection` - https://arxiv.org/abs/2112.01526
+
 @inproceedings{li2021improved,
   title={MViTv2: Improved multiscale vision transformers for classification and detection},
   author={Li, Yanghao and Wu, Chao-Yuan and Fan, Haoqi and Mangalam, Karttikeya and Xiong, Bo and Malik, Jitendra and Feichtenhofer, Christoph},
@@ -23,7 +26,7 @@ import torch
 from torch import nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import Mlp, DropPath, calculate_drop_path_rates, trunc_normal_tf_, get_norm_layer, to_2tuple
+from timm.layers import Mlp, DropPath, calculate_drop_path_rates, trunc_normal_tf_, get_norm_layer, to_2tuple, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._features_fx import register_notrace_function
@@ -857,15 +860,15 @@ class MultiScaleVit(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
         if global_pool is not None:
             self.global_pool = global_pool
-        device = self.head.fc.weight.device if hasattr(self.head.fc, 'weight') else None
-        dtype = self.head.fc.weight.dtype if hasattr(self.head.fc, 'weight') else None
         self.head = nn.Sequential(OrderedDict([
             ('drop', nn.Dropout(self.drop_rate)),
-            ('fc', nn.Linear(self.num_features, num_classes, device=device, dtype=dtype) if num_classes > 0 else nn.Identity())
+            ('fc', nn.Linear(self.num_features, num_classes, **dd) if num_classes > 0 else nn.Identity())
         ]))
+        self.head.train(self.training)
 
     def forward_intermediates(
             self,

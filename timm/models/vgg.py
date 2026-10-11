@@ -3,6 +3,9 @@
 Adapted from https://github.com/pytorch/vision 'vgg.py' (BSD-3-Clause) with a few changes for
 timm functionality.
 
+Papers:
+* `Very Deep Convolutional Networks for Large-Scale Image Recognition` - https://arxiv.org/abs/1409.1556
+
 Copyright 2021 Ross Wightman
 """
 from typing import Any, Dict, List, Optional, Type, Union, cast
@@ -12,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import ClassifierHead
+from timm.layers import ClassifierHead, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features_fx import register_notrace_module
 from ._registry import register_model, generate_default_cfgs
@@ -216,8 +219,9 @@ class VGG(nn.Module):
             num_classes: Number of classes for new classifier.
             global_pool: Global pooling type.
         """
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through feature extraction layers.

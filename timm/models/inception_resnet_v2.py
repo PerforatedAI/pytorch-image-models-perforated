@@ -1,6 +1,10 @@
 """ Pytorch Inception-Resnet-V2 implementation
 Sourced from https://github.com/Cadene/tensorflow-model-zoo.torch (MIT License) which is
 based upon Google's Tensorflow implementation and pretrained weights (Apache 2.0 License)
+
+Papers:
+* `Inception-v4, Inception-ResNet and the Impact of Residual Connections on Learning` - https://arxiv.org/abs/1602.07261
+* `Ensemble Adversarial Training: Attacks and Defenses` - https://arxiv.org/abs/1705.07204
 """
 from functools import partial
 from typing import Type, Optional
@@ -8,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
-from timm.layers import create_classifier, ConvNormAct
+from timm.layers import create_classifier, ConvNormAct, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._manipulate import flatten_modules
 from ._registry import register_model, generate_default_cfgs, register_model_deprecations
@@ -322,9 +326,14 @@ class InceptionResnetV2(nn.Module):
     def get_classifier(self) -> nn.Module:
         return self.classif
 
-    def reset_classifier(self, num_classes: int, global_pool: str = 'avg'):
+    def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.global_pool, self.classif = create_classifier(self.num_features, self.num_classes, pool_type=global_pool)
+        if global_pool is None:
+            global_pool = self.global_pool.pool_type
+        self.global_pool, self.classif = create_classifier(self.num_features, self.num_classes, pool_type=global_pool, **dd)
+        self.global_pool.train(self.training)
+        self.classif.train(self.training)
 
     def forward_features(self, x):
         x = self.conv2d_1a(x)

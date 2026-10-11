@@ -1,5 +1,8 @@
 """ PP-HGNet (V1 & V2)
 
+SSLD pretrained weights:
+* `Beyond Self-Supervision: A Simple Yet Effective Network Distillation Alternative to Improve Backbones` - https://arxiv.org/abs/2103.05959
+
 Reference:
 https://github.com/PaddlePaddle/PaddleClas/blob/develop/docs/zh_CN/models/ImageNet1k/PP-HGNetV2.md
 The Paddle Implement of PP-HGNet (https://github.com/PaddlePaddle/PaddleClas/blob/release/2.5.1/docs/en/models/PP-HGNet_en.md)
@@ -13,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import SelectAdaptivePool2d, DropPath, calculate_drop_path_rates, create_conv2d
+from timm.layers import SelectAdaptivePool2d, DropPath, calculate_drop_path_rates, create_conv2d, get_device_dtype
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._registry import register_model, generate_default_cfgs
@@ -439,14 +442,17 @@ class ClassifierHead(nn.Module):
         self.fc = nn.Linear(self.num_features, num_classes, **dd) if num_classes > 0 else nn.Identity()
 
     def reset(self, num_classes: int, pool_type: Optional[str] = None, device=None, dtype=None):
-        dd = {'device': device, 'dtype': dtype}
+        dd = get_device_dtype(self, device=device, dtype=dtype)
         if pool_type is not None:
             if not pool_type:
                 assert num_classes == 0, 'Classifier head must be removed if pooling is disabled'
             self.global_pool = SelectAdaptivePool2d(pool_type=pool_type)
+            self.global_pool.train(self.training)
             self.flatten = nn.Flatten(1) if pool_type else nn.Identity()  # don't flatten if pooling disabled
+            self.flatten.train(self.training)
 
         self.fc = nn.Linear(self.num_features, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.fc.train(self.training)
 
     def forward(self, x, pre_logits: bool = False):
         x = self.global_pool(x)
@@ -473,7 +479,6 @@ class HighPerfGpuNet(nn.Module):
             use_lab: bool = False,
             device=None,
             dtype=None,
-            **kwargs,
     ):
         super().__init__()
         dd = {'device': device, 'dtype': dtype}
@@ -562,8 +567,9 @@ class HighPerfGpuNet(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None, device=None, dtype=None):
+        dd = get_device_dtype(self, device=device, dtype=dtype)
         self.num_classes = num_classes
-        self.head.reset(num_classes, global_pool, device=device, dtype=dtype)
+        self.head.reset(num_classes, global_pool, **dd)
 
     def forward_intermediates(
             self,

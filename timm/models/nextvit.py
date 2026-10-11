@@ -1,6 +1,7 @@
 """ Next-ViT
 
-As described in https://arxiv.org/abs/2207.05501
+Papers:
+* `Next-ViT: Next Generation Vision Transformer for Efficient Deployment in Realistic Industrial Scenarios` - https://arxiv.org/abs/2207.05501
 
 Next-ViT model defs and weights adapted from https://github.com/bytedance/Next-ViT, original copyright below
 """
@@ -13,7 +14,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.layers import DropPath, calculate_drop_path_rates, trunc_normal_, ConvMlp, get_norm_layer, get_act_layer, use_fused_attn
+from timm.layers import DropPath, calculate_drop_path_rates, trunc_normal_, ConvMlp, get_norm_layer, get_act_layer, use_fused_attn, get_device_dtype
 from timm.layers import ClassifierHead
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
@@ -509,6 +510,7 @@ class NextViT(nn.Module):
             drop_path_rate: float = 0.1,
             attn_drop_rate: float = 0.,
             drop_rate: float = 0.,
+            proj_drop_rate: float = 0.,
             head_dim: int = 32,
             mix_block_ratio: float = 0.75,
             norm_layer: Type[nn.Module] = nn.BatchNorm2d,
@@ -569,7 +571,7 @@ class NextViT(nn.Module):
                 sr_ratio=sr_ratios[stage_idx],
                 mix_block_ratio=mix_block_ratio,
                 head_dim=head_dim,
-                drop=drop_rate,
+                drop=proj_drop_rate,
                 attn_drop=attn_drop_rate,
                 drop_path=dpr[stage_idx],
                 norm_layer=norm_layer,
@@ -582,7 +584,13 @@ class NextViT(nn.Module):
         self.num_features = self.head_hidden_size = out_chs
         self.stages = nn.Sequential(*stages)
         self.norm = norm_layer(out_chs, **dd)
-        self.head = ClassifierHead(pool_type=global_pool, in_features=out_chs, num_classes=num_classes, **dd)
+        self.head = ClassifierHead(
+            pool_type=global_pool,
+            in_features=out_chs,
+            num_classes=num_classes,
+            drop_rate=drop_rate,
+            **dd,
+        )
 
         self.stage_out_idx = [sum(depths[:idx + 1]) - 1 for idx in range(len(depths))]
         self._initialize_weights()
@@ -619,8 +627,9 @@ class NextViT(nn.Module):
         return self.head.fc
 
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
+        dd = get_device_dtype(self)
         self.num_classes = num_classes
-        self.head.reset(num_classes, pool_type=global_pool)
+        self.head.reset(num_classes, pool_type=global_pool, **dd)
 
     def forward_intermediates(
             self,
