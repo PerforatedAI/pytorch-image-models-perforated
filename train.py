@@ -511,6 +511,9 @@ group.add_argument('--pai-load-folder', type=str, default=None,
                    help='Folder to load PAI state from for DDP automatic resumption after restructure')
 group.add_argument('--pai-save-name', type=str, default='PAI',
                    help='Save name/folder for PAI checkpoints (default: PAI)')
+group.add_argument('--pai-restart-lr-scale', type=float, default=0.01,
+                   help='Scale the learning rate by this factor for every cycle after a PAI restructure '
+                        '(default: 0.01, use 1.0 to disable)')
 
 group = parser.add_argument_group('Scheduled resolution loader parameters')
 group.add_argument('--train-batches-per-epoch', '--train-steps-per-epoch', type=int, default=None,
@@ -781,6 +784,7 @@ def main():
     if args.grad_checkpointing:
         model.set_grad_checkpointing(enable=True)
 
+    _pai_did_load = False
     if has_perforatedai and args.perforate_model:
         model = UPA.perforate_model(model, save_name=args.pai_save_name, maximizing_score=(args.eval_metric != 'loss'))
         if args.pai_load_folder is not None:
@@ -797,6 +801,7 @@ def main():
                     _max_switch = max(_switch_nums)
                     model = UPA.load_system(model, args.pai_load_folder, f'switch_{_max_switch}', True)
                     _logger.info(f'Loaded PAI state from {args.pai_load_folder}/switch_{_max_switch}.pt')
+                    _pai_did_load = True
 
     # Create training task (classification or distillation)
     task = None
@@ -1089,6 +1094,14 @@ def main():
             _logger.info(
                 f'Learning rate ({args.lr}) calculated from base learning rate ({args.lr_base}) '
                 f'and effective global batch size ({global_batch_size:g}) with {args.lr_base_scale} scaling.')
+
+    if has_perforatedai and args.perforate_model:
+        # Computed from the original LR so it never compounds across restructures
+        _pai_restart_lr = args.lr * args.pai_restart_lr_scale
+        if _pai_did_load:
+            args.lr = _pai_restart_lr
+            if utils.is_primary(args) and args.pai_restart_lr_scale != 1.0:
+                _logger.info(f'PAI restart: learning rate scaled by {args.pai_restart_lr_scale} to {args.lr}')
 
     loader_eval = None
     if args.val_split:
@@ -1470,33 +1483,11 @@ def main():
 
         if has_perforatedai and args.perforate_model:
             _pai_model = task.get_trainable_module()
-            if args.distributed:
-                if utils.is_primary(args):
-                    _pai_inner = _pai_model.module
-                    _pai_inner, _pai_restructured, _pai_complete = GPA.pai_tracker.add_validation_score(
-                        latest_metric, _pai_inner
-                    )
-                    _pai_inner = _pai_inner.to(device)
-                    _pai_model.module = _pai_inner
-                else:
-                    _pai_restructured = False
-                    _pai_complete = False
-                _r_t = torch.tensor([1 if _pai_restructured else 0], dtype=torch.int, device=device)
-                _c_t = torch.tensor([1 if _pai_complete else 0], dtype=torch.int, device=device)
-                torch.distributed.broadcast(_r_t, src=0)
-                torch.distributed.broadcast(_c_t, src=0)
-                _pai_restructured = bool(_r_t.item())
-                _pai_complete = bool(_c_t.item())
-            else:
-                _pai_model, _pai_restructured, _pai_complete = GPA.pai_tracker.add_validation_score(
-                    latest_metric, _pai_model
-                )
-                _pai_model.to(device=device, dtype=model_dtype)
-                if args.channels_last:
-                    _pai_model.to(memory_format=torch.channels_last)
-                task.trainable_module = _pai_model
-                model = task.get_trainable_module()
-                eval_model = task.get_eval_model()
+            # add_validation_score_distributed handles rank coordination, broadcast, and
+            # non-zero rank checkpoint loading. Falls back to add_validation_score on single GPU.
+            _pai_model, _pai_restructured, _pai_complete = GPA.pai_tracker.add_validation_score(
+                latest_metric, _pai_model
+            )
 
             if _pai_complete:
                 if utils.is_primary(args):
@@ -1511,17 +1502,30 @@ def main():
                 break
 
             if _pai_restructured:
+                _logger.info(
+                    f'PAI model restructured, continuing with a new optimizer and restarted LR schedule '
+                    f'(lr {_pai_restart_lr:g})'
+                )
                 if args.distributed:
-                    if utils.is_primary(args):
-                        _logger.info('PAI model restructured, exiting for shell script restart...')
-                    torch.distributed.barrier()
-                    torch.distributed.destroy_process_group()
-                    raise SystemExit(0)
-                # Single GPU continues in-process; these must match the optimizer and scheduler created above
-                _logger.info('PAI model restructured, continuing with a new optimizer and restarted LR schedule')
+                    # The function already coordinated ranks and loaded the checkpoint on non-zero
+                    # ranks, but its DDP wrapper uses default kwargs. Unwrap and re-wrap via
+                    # task.prepare_distributed so the PAI-specific kwargs (broadcast_buffers=False,
+                    # device_ids) are applied correctly.
+                    task.trainable_module = _pai_model.module
+                    task.prepare_distributed(device_ids=[device], **_ddp_kwargs)
+                else:
+                    # Single GPU: function returned the restructured inner model
+                    _pai_model.to(device=device, dtype=model_dtype)
+                    if args.channels_last:
+                        _pai_model.to(memory_format=torch.channels_last)
+                    task.trainable_module = _pai_model
+                model = task.get_trainable_module()
+                eval_model = task.get_eval_model()
+                _pai_opt_kwargs = optimizer_kwargs(cfg=args)
+                _pai_opt_kwargs['lr'] = _pai_restart_lr
                 optimizer = create_optimizer_v2(
                     model,
-                    **optimizer_kwargs(cfg=args),
+                    **_pai_opt_kwargs,
                     **args.opt_kwargs,
                 )
                 GPA.pai_tracker.set_optimizer_instance(optimizer)
